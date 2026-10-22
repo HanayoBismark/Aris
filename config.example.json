@@ -1,0 +1,21 @@
+{
+  "napcat": {
+    "wsUrl": "ws://127.0.0.1:3001",
+    "accessToken": ""
+  },
+  "dsh": {
+    "command": "",
+    "args": [],
+    "replyTimeoutMs": 180000
+  },
+  "bot": {
+    "trigger": "mention",
+    "groups": [],
+    "admins": [],
+    "toolPolicy": "web",
+    "personaFile": "persona/default.md",
+    "replyWithQuote": true,
+    "maxReplyLength": 1000,
+    "maxParallel": 2
+  }
+}

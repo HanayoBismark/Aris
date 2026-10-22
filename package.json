@@ -1,0 +1,24 @@
+{
+  "name": "napcat-dsh-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/*.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "^0.2.1-rc.2",
+    "sharp": "^0.35.5"
+  },
+  "allowScripts": {
+    "@deepseek-ai/dsh-subprocess-local@0.2.1-rc.2": true,
+    "@google/genai@2.21.0": true,
+    "koffi@3.1.1": true,
+    "node-pty@1.2.0-beta.15": true,
+    "protobufjs@7.6.6": true
+  }
+}
