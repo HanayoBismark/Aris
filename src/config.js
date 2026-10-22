@@ -45,6 +45,7 @@ export async function loadConfig() {
       maxReplyLength: positive(raw.bot?.maxReplyLength, 1000),
       maxParallel: positive(raw.bot?.maxParallel, 2),
     },
+    voice: voiceConfig(raw.voice),
     workspace: path.join(root, "workspace"),
     storeFile: path.join(root, "data", "sessions.json"),
     noteFile: path.join(root, "data", "notes.json"),
@@ -57,7 +58,27 @@ function arrayOf(value) {
   return Array.isArray(value) ? value.map(String).filter(Boolean) : []
 }
 
+function speedFactor(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number < 0.5 || number > 1.5) return 0.85
+  return number
+}
+
 function positive(value, fallback) {
   const number = Number(value)
   return Number.isFinite(number) && number > 0 ? number : fallback
+}
+
+function voiceConfig(raw) {
+  return {
+    enabled: raw?.enabled === true,
+    baseUrl: String(raw?.baseUrl ?? "http://127.0.0.1:9880").replace(/\/$/, ""),
+    refAudio: String(raw?.refAudio ?? ""),
+    promptText: String(raw?.promptText ?? ""),
+    promptLang: String(raw?.promptLang ?? "ja"),
+    textLang: String(raw?.textLang ?? "zh"),
+    gptWeights: String(raw?.gptWeights ?? ""),
+    sovitsWeights: String(raw?.sovitsWeights ?? ""),
+    speedFactor: speedFactor(raw?.speedFactor),
+  }
 }

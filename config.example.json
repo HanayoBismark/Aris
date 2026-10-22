@@ -17,5 +17,16 @@
     "replyWithQuote": true,
     "maxReplyLength": 1000,
     "maxParallel": 2
+  },
+  "voice": {
+    "enabled": false,
+    "baseUrl": "http://127.0.0.1:9880",
+    "refAudio": "",
+    "promptText": "",
+    "promptLang": "ja",
+    "textLang": "zh",
+    "gptWeights": "",
+    "sovitsWeights": "",
+    "speedFactor": 0.85
   }
 }

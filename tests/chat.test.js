@@ -5,7 +5,7 @@ import path from "node:path"
 import test from "node:test"
 import { PassThrough } from "node:stream"
 import { AcpClient } from "../src/acp-client.js"
-import { addressMode, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, mergeBurst, messageText, parseOutgoing, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
+import { addressMode, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, mergeBurst, messageText, parseOutgoing, planVoice, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
 import { faceTitle } from "../src/favfaces.js"
 import { formatTranscript } from "../src/room.js"
 import { SessionStore } from "../src/store.js"
@@ -189,11 +189,18 @@ test("戳一戳、保存表情和发出表情", () => {
   assert.equal(quiet.type, "chat")
   const called = decide(groupEvent([{ type: "at", data: { qq: selfId } }]), { selfId, trigger: "all" })
   assert.equal(called.type, "poke")
-  const aside = takeAsides("好[[remember:鱼不喊主人]][[keep:探头]][[silent]]")
+  const aside = takeAsides("好[[remember:鱼不喊主人]][[keep:探头]][[voice:老师好]][[silent]]")
   assert.equal(aside.silent, false)
   assert.deepEqual(aside.notes, ["鱼不喊主人"])
   assert.deepEqual(aside.keeps, ["探头"])
+  assert.equal(aside.voice, "老师好")
   assert.equal(aside.text.includes("[["), false)
+  assert.equal(planVoice("在的。", "老师好", true).speak, "老师好")
+  assert.equal(planVoice("老师好", "老师好", true).body, "")
+  assert.equal(planVoice("长".repeat(81), "老师好", true).speak, "")
+  assert.equal(planVoice("", "老师好", false).speak, "")
+  assert.equal(planVoice("", "字".repeat(40), true).speak, "字".repeat(40))
+  assert.equal(planVoice("", "字".repeat(41), true).speak, "")
   assert.equal(takeAsides("[[silent]]").silent, true)
   assert.deepEqual(splitBubbles("在的。"), ["在的。"])
   assert.deepEqual(splitBubbles("在的。\n\n再补一句。\n\n第三句"), ["在的。", "再补一句。\n第三句"])

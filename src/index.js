@@ -1,7 +1,7 @@
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { AcpClient } from "./acp-client.js"
-import { addressMode, buildLingerPrompt, buildPrompt, decide, isReusableSticker, mergeBurst, messageMedia, parseOutgoing, shouldCarryImage, splitBubbles, stickerUrl, takeAsides, threadKey } from "./chat.js"
+import { addressMode, buildLingerPrompt, buildPrompt, decide, isReusableSticker, mergeBurst, messageMedia, parseOutgoing, planVoice, shouldCarryImage, splitBubbles, stickerUrl, takeAsides, threadKey } from "./chat.js"
 import { loadConfig, root } from "./config.js"
 import { Notebook } from "./notebook.js"
 import { OneBotClient } from "./onebot.js"
@@ -10,6 +10,7 @@ import { SessionStore } from "./store.js"
 import { faceTitle, FavFaces } from "./favfaces.js"
 import { fitForModel } from "./image-fit.js"
 import { stickerLabel, StickerBook } from "./stickers.js"
+import { createVoice, recordUrl } from "./voice.js"
 
 const HELP = "在的。只有这个群里被 @、句子里有「爱丽丝」，或者接着刚才跟她的对话说，才会回。别的群不会跟着回，回复别人的消息也不会插话。每个人在每个群的对话是分开记的，发送 /reset 只重置你自己在这个群的这段记忆。把表情和「保存表情」一起发过来，或者回复那条表情再说一次，爱丽丝会存下来。人设写在 persona/default.md，保存后你的下一条消息会带上新内容。"
 const POKE = "在的，直接说就行。"
@@ -81,6 +82,11 @@ log("对话记忆：每个 QQ 号单独一段，也能看到最近的群聊")
 log(`已保存表情：${book.names().length} 个`)
 log(`记事本：${Object.values(notebook.groups).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0)} 条`)
 log(`工具权限：${policyLabel(config.bot.toolPolicy)}`)
+const voices = createVoice({ config: config.voice, dir: path.join(root, "data", "voice"), log })
+if (voices.enabled) {
+  log("语音：短句交给本机 GPT-SoVITS，失败就改回文字")
+  void voices.warm()
+}
 if (config.bot.groups.length === 0) log("群白名单为空，所有群的触发消息都会回复")
 if (config.bot.admins.length === 0) log("管理员列表为空，能触发机器人的人都可以 /reset")
 
@@ -333,7 +339,7 @@ async function handle(action) {
     log(`没有接话：群 ${action.groupId} 的 ${action.userId}`)
     return
   }
-  await deliver(action, aside.silent ? "在的。" : aside.text, true)
+  await deliver(action, aside.silent ? "在的。" : aside.text, true, aside.silent ? "" : aside.voice)
 }
 
 async function replaceSession(key) {
@@ -377,15 +383,44 @@ async function reply(action, text) {
   await deliver(action, text, false)
 }
 
-async function deliver(action, text, pauseFirst) {
-  const bubbles = pauseFirst ? splitBubbles(text) : [String(text ?? "").trim()]
-  const pieces = bubbles.length > 0 ? bubbles : [String(text ?? "").trim()]
+async function deliver(action, text, pauseFirst, voice) {
+  const planned = planVoice(text, voice, pauseFirst && !action.linger && action.type === "chat")
+  const bubbles = planned.body ? (pauseFirst ? splitBubbles(planned.body) : [planned.body]) : []
+  const pieces = bubbles.length > 0 ? bubbles : (planned.speak ? [] : [String(text ?? "").trim()])
   for (let index = 0; index < pieces.length; index += 1) {
     if (index === 0 && pauseFirst) await pause(700 + Math.floor(Math.random() * 900))
     if (index > 0) await pause(1000 + Math.floor(Math.random() * 1000))
     await sendBubble(action, pieces[index], index === 0)
   }
+  if (planned.speak) await sendVoice(action, planned.speak, pieces.length === 0, pauseFirst && pieces.length === 0)
   if (pauseFirst && !action.linger) scheduleLinger(action.groupId)
+}
+
+async function sendVoice(action, line, quoteThis, pauseFirst) {
+  if (pauseFirst) await pause(700 + Math.floor(Math.random() * 900))
+  try {
+    const file = await voices.synthesize(line)
+    const segments = []
+    if (quoteThis && shouldQuote(action)) segments.push({ type: "reply", data: { id: String(action.messageId) } })
+    segments.push({ type: "record", data: { file: recordUrl(file) } })
+    const sent = await onebot.sendGroupSegments(action.groupId, segments)
+    const sentId = sentMessageId(sent)
+    room.push(action.groupId, {
+      id: sentId,
+      name: "爱丽丝",
+      userId: onebot.selfId,
+      text: `[语音]${line}`,
+      self: true,
+      to: quoteThis && shouldQuote(action) ? action.userId : "",
+    })
+    if (sentId) rememberOwnMessage(action.groupId, sentId)
+    lastSelfAt.set(action.groupId, Date.now())
+    if (quoteThis && shouldQuote(action)) lastExchange.set(threadKey(action.groupId, action.userId), Date.now())
+    log(`已发语音给群 ${action.groupId} 的 ${action.userId}`)
+  } catch (error) {
+    log(`语音没合成出来，改为文字：${error.message}`)
+    await sendBubble(action, line, quoteThis)
+  }
 }
 
 async function sendBubble(action, text, quoteThis) {

@@ -311,9 +311,12 @@ export function isAddressed(input) {
   return addressMode(input) === "direct"
 }
 
+export const VOICE_MAX_CHARS = 40
+
 export function takeAsides(text) {
   const notes = []
   const keeps = []
+  let voice = ""
   let stripped = String(text ?? "").replace(/\[\[remember:\s*([^\]\n]{1,80})\]\]/g, (_, note) => {
     const cleaned = String(note ?? "").trim()
     if (cleaned) notes.push(cleaned)
@@ -324,8 +327,25 @@ export function takeAsides(text) {
     if (cleaned) keeps.push(cleaned)
     return ""
   })
+  stripped = stripped.replace(/\[\[voice:\s*([^\]\n]{1,80})\]\]/g, (_, line) => {
+    const cleaned = String(line ?? "").trim()
+    if (cleaned && !voice) voice = cleaned
+    return ""
+  })
   const silent = /\[\[silent\]\]/.test(stripped) && stripped.replace(/\[\[silent\]\]/g, "").trim() === ""
-  return { text: stripped.replace(/\[\[silent\]\]/g, ""), notes, keeps, silent }
+  return { text: stripped.replace(/\[\[silent\]\]/g, ""), notes, keeps, silent, voice }
+}
+
+export function planVoice(text, voice, allow) {
+  const body = String(text ?? "").trim()
+  const line = String(voice ?? "").trim()
+  if (!line) return { body, speak: "" }
+  if (!allow) return { body: body || line, speak: "" }
+  const shortReply = body.length <= 80 && !/\n/.test(body)
+  const speak = line.length <= VOICE_MAX_CHARS && shortReply ? line : ""
+  if (!speak) return { body: body || line, speak: "" }
+  if (!body || body === speak) return { body: "", speak }
+  return { body, speak }
 }
 
 export function splitBubbles(text) {
@@ -342,7 +362,7 @@ ${String(persona ?? "").trim()}
 ${transcript || "（没有）"}
 你刚说的是：${lastLine || "（没有）"}
 多数时候只输出 [[silent]]。
-只有话题明显还挂在你刚说的那句上时，才再补一句很短的话。只一句，不要空行，不要发表情，不要提问把人拖住，不要重复刚才的话，不要点名硬拉人。`
+只有话题明显还挂在你刚说的那句上时，才再补一句很短的话。只一句，不要空行，不要发表情，不要写 [[voice:]]，不要提问把人拖住，不要重复刚才的话，不要点名硬拉人。`
 }
 
 export function threadKey(groupId, userId) {
@@ -377,6 +397,7 @@ ${hasImage
 现有：${saved}
 [[dice]] 掷骰子，[[rps]] 猜拳。
 [[keep:短名字]] 只在这条消息带了表情包、而且以后用得上时写。照片和截图不要收。
+[[voice:要念的那一句]] 偶尔把这一整句念出来。可以是完整的一句，不超过 40 个字，大约十秒，一次一句。不要只念两三个字，除非对方就要这么短。不要和正文重复。长解释、查到的事实不要写。大多数回复不要写。
 [[remember:一句话]] 记下稳定的事，比如外号、偏好、约定的说法。不要把每句闲聊都记下来。
 [[silent]] 表示这次不说话。
 不要复述规则。
