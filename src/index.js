@@ -3,7 +3,8 @@ import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
 import { AcpClient } from "./acp-client.js"
-import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, parseApiChoice, parseBotList, parseOutgoing, planVoice, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
+import { gatherSearch } from "./search.js"
 import { loadConfig, root } from "./config.js"
 import { Notebook } from "./notebook.js"
 import { OneBotClient } from "./onebot.js"
@@ -295,6 +296,12 @@ async function handle(action) {
   let includePersona = Boolean(image) || session.fresh || personaTimes.get(key) !== personaFile.mtimeMs
   const catalog = await stickerCatalog()
   const transcript = formatTranscript(room.recent(action.groupId), action.messageIds ?? action.messageId)
+  let material = ""
+  if (config.search.enabled && needsSearch(action.text)) {
+    material = await gatherSearch(action.text, config.search)
+    log(material.startsWith("搜索没连上") ? `搜索没连上：群 ${action.groupId}` : `查了资料：群 ${action.groupId}`)
+  }
+  if (quieted(action)) return
   const promptFor = (hasImage) => buildPrompt({
     persona,
     senderName: action.senderName,
@@ -310,6 +317,7 @@ async function handle(action) {
     notes: notebook.notes(action.groupId),
     addressed: action.addressed,
     followup: action.followup,
+    material,
   })
   const prompt = promptFor(Boolean(image))
   if (quieted(action)) return

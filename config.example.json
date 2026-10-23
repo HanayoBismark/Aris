@@ -13,7 +13,7 @@
     "trigger": "mention",
     "groups": [],
     "admins": ["329919475"],
-    "toolPolicy": "web",
+    "toolPolicy": "deny",
     "personaFile": "persona/default.md",
     "replyWithQuote": true,
     "maxReplyLength": 1000,
@@ -29,5 +29,12 @@
     "gptWeights": "",
     "sovitsWeights": "",
     "speedFactor": 0.85
+  },
+  "search": {
+    "enabled": true,
+    "searxngUrl": "http://127.0.0.1:8088",
+    "timeoutMs": 12000,
+    "maxResults": 5,
+    "fetchPages": 2
   }
 }

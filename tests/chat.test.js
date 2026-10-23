@@ -5,7 +5,7 @@ import path from "node:path"
 import test from "node:test"
 import { PassThrough } from "node:stream"
 import { AcpClient } from "../src/acp-client.js"
-import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, parseApiChoice, parseBotList, parseOutgoing, planVoice, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, needsFresh, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
 import { faceTitle } from "../src/favfaces.js"
 import { formatTranscript } from "../src/room.js"
 import { SessionStore } from "../src/store.js"
@@ -101,8 +101,9 @@ test("人设只在需要时放进提示词", () => {
   })
   assert.match(full, /人设标记-甲/)
   assert.match(full, /不要调用工具/)
-  assert.match(full, /web_search/)
-  assert.match(full, /查完没有结果/)
+  assert.match(full, /本机查到的材料/)
+  assert.match(full, /这轮没有查资料/)
+  assert.doesNotMatch(full, /web_search/)
   assert.match(full, /不要超过两句/)
   assert.match(full, /最近的群聊/)
   assert.match(full, /表情收藏/)
@@ -119,6 +120,16 @@ test("人设只在需要时放进提示词", () => {
     includePersona: false,
   })
   assert.doesNotMatch(later, /人设标记-甲/)
+  assert.match(buildPrompt({ text: "金价", material: "950.5 元/克" }), /950\.5 元\/克/)
+})
+
+test("只有事实和价格才查资料", () => {
+  assert.equal(needsSearch("查询一下当前黄金价格"), true)
+  assert.equal(needsSearch("今天有什么新闻"), true)
+  assert.equal(needsFresh("今天有什么新闻"), true)
+  assert.equal(needsSearch("在吗"), false)
+  assert.equal(needsSearch("你觉得这个游戏怎么样"), false)
+  assert.equal(needsFresh("查询一下作品设定"), false)
 })
 
 test("工具权限默认拒绝，联网模式只放行搜索", () => {

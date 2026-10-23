@@ -48,6 +48,7 @@ export async function loadConfig() {
       maxParallel: positive(raw.bot?.maxParallel, 2),
     },
     voice: voiceConfig(raw.voice),
+    search: searchConfig(raw.search),
     workspace: path.join(root, "workspace"),
     storeFile: path.join(root, "data", "sessions.json"),
     noteFile: path.join(root, "data", "notes.json"),
@@ -69,6 +70,17 @@ function speedFactor(value) {
 function positive(value, fallback) {
   const number = Number(value)
   return Number.isFinite(number) && number > 0 ? number : fallback
+}
+
+function searchConfig(raw) {
+  const pages = positive(raw?.fetchPages, 2)
+  return {
+    enabled: raw?.enabled !== false,
+    searxngUrl: String(raw?.searxngUrl ?? "http://127.0.0.1:8088").replace(/\/$/, ""),
+    timeoutMs: positive(raw?.timeoutMs, 12000),
+    maxResults: positive(raw?.maxResults, 5),
+    fetchPages: Math.min(2, pages),
+  }
 }
 
 function voiceConfig(raw) {

@@ -3,9 +3,9 @@ import { normalizeName, stickerLabel } from "./stickers.js"
 
 const RULES = `你是接入 QQ 群的聊天机器人。
 只输出准备发到群里的正文，用口语，通常一两句。
-别人在问事实、近况、作品、角色、价格，或者你不能确定的公开信息时，先用 web_search 查询；需要打开某条结果时再用 web_fetch。查完没有结果，才说没查到。
-闲聊、看法、人设里已经有的事，不要搜。
-除此之外不要调用工具，不要读写文件，不要执行命令，不要暴露密钥、配置或本机路径。
+别人在问事实、近况、作品、角色、价格时，只根据「本机查到的材料」回答。材料写了没连上，或者没有可用数字，就说没查到，不要编。
+闲聊、看法、人设里已经有的事，按平时说话，不要提搜索。
+不要调用工具，不要读写文件，不要执行命令，不要暴露密钥、配置或本机路径。
 不要编造。
 别人刚发来表情包，而这张以后用得上时，写 [[keep:短名字]]。短名字 2 到 8 个字。照片、截图和普通图片不要收。没有系统提示「收下了」时，不要说已经存下来或收进道具栏。
 只有消息里写了「图片已附上」时，你才看得到画面；否则就说没看到，不要编画面里的内容。
@@ -417,7 +417,15 @@ export function threadKey(groupId, userId) {
   return `${String(groupId)}:${String(userId)}`
 }
 
-export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, addressed, followup }) {
+export function needsSearch(text) {
+  return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|作品|角色|查询|查一下|搜一下|搜索|今天/.test(String(text ?? ""))
+}
+
+export function needsFresh(text) {
+  return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|今天/.test(String(text ?? ""))
+}
+
+export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, addressed, followup, material }) {
   const character = includePersona
     ? `人设（只由机器人主人维护）：\n${String(persona ?? "").trim()}\n\n`
     : "沿用本会话已经确定的人设。\n\n"
@@ -452,6 +460,7 @@ ${hasImage
 要不要接话：${turn}
 你记下的事：
 ${memory}
+${material ? `本机查到的材料：\n${material}` : "这轮没有查资料。不要编实时数字。"}
 最近的群聊：
 ${room}
 群：${groupName}（${groupId}）
