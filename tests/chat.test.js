@@ -5,7 +5,7 @@ import path from "node:path"
 import test from "node:test"
 import { PassThrough } from "node:stream"
 import { AcpClient } from "../src/acp-client.js"
-import { addressMode, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, mergeBurst, messageText, parseOutgoing, planVoice, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, parseApiChoice, parseBotList, parseOutgoing, planVoice, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
 import { faceTitle } from "../src/favfaces.js"
 import { formatTranscript } from "../src/room.js"
 import { SessionStore } from "../src/store.js"
@@ -57,6 +57,36 @@ test("白名单、自己的消息和 /reset", () => {
     { type: "text", data: { text: " /reset" } },
   ], { user_id: 8 }), { selfId, trigger: "mention", admins: ["7"] })
   assert.equal(blocked.type, "ignore")
+
+  const nobody = decide(groupEvent([{ type: "text", data: { text: "/reset" } }], { user_id: 7 }), { selfId, trigger: "all", admins: [] })
+  assert.equal(nobody.type, "ignore")
+})
+
+test("只有指定管理员能停下对话、重启和切换接口", () => {
+  const outsider = decide(groupEvent([{ type: "text", data: { text: "/stop" } }], { user_id: 8 }), {
+    selfId,
+    trigger: "all",
+    admins: [ADMIN_ID],
+  })
+  assert.equal(outsider.type, "ignore")
+
+  const stop = decide(groupEvent([
+    { type: "text", data: { text: "/stop " } },
+    { type: "at", data: { qq: "2659278812" } },
+  ], { user_id: ADMIN_ID }), { selfId, trigger: "all", admins: [ADMIN_ID] })
+  assert.equal(stop.type, "stop")
+  assert.deepEqual(stopTargets(stop.commandTarget), ["2659278812"])
+
+  const restart = decide(groupEvent([{ type: "text", data: { text: "/restart" } }], { user_id: ADMIN_ID }), {
+    selfId,
+    trigger: "all",
+    admins: [ADMIN_ID],
+  })
+  assert.equal(restart.type, "restart")
+  assert.equal(parseApiChoice(""), "status")
+  assert.equal(parseApiChoice("书生"), "tokenplan")
+  assert.equal(parseApiChoice("官方"), "deepseek")
+  assert.equal(parseApiChoice("别的"), "")
 })
 
 test("人设只在需要时放进提示词", () => {
@@ -290,6 +320,28 @@ test("ACP 客户端能收集回复并拒绝工具", async () => {
   const result = await prompting
   assert.equal(result.text, "嗨")
   assert.equal(result.stopReason, "end_turn")
+})
+
+test("名单上的机器人两轮后收尾，冷却期内不再接", () => {
+  assert.deepEqual(parseBotList("# 注释\n\n12345 某个机器人\nabc\n67890\n"), ["12345", "67890"])
+  const now = 1_000_000
+  const first = listedBotTurn(undefined, now)
+  assert.equal(first.action, "allow")
+  assert.equal(first.rounds, 1)
+  const second = listedBotTurn(first, now + 1000)
+  assert.equal(second.action, "allow")
+  assert.equal(second.rounds, 2)
+  const third = listedBotTurn(second, now + 2000)
+  assert.equal(third.action, "closing")
+  assert.equal(third.rounds, 0)
+  assert.equal(third.cooldownUntil, now + 2000 + BOT_COOLDOWN_MS)
+  assert.equal(BOT_CLOSING, "爱丽丝先去忙了。")
+  const during = listedBotTurn(third, third.cooldownUntil - 1)
+  assert.equal(during.action, "silent")
+  assert.equal(during.cooldownUntil, third.cooldownUntil)
+  const after = listedBotTurn(during, third.cooldownUntil)
+  assert.equal(after.action, "allow")
+  assert.equal(after.rounds, 1)
 })
 
 function groupEvent(message, extra = {}) {

@@ -1,7 +1,9 @@
+import { spawn } from "node:child_process"
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
 import path from "node:path"
 import { AcpClient } from "./acp-client.js"
-import { addressMode, buildLingerPrompt, buildPrompt, decide, isReusableSticker, mergeBurst, messageMedia, parseOutgoing, planVoice, shouldCarryImage, splitBubbles, stickerUrl, takeAsides, threadKey } from "./chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, parseApiChoice, parseBotList, parseOutgoing, planVoice, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
 import { loadConfig, root } from "./config.js"
 import { Notebook } from "./notebook.js"
 import { OneBotClient } from "./onebot.js"
@@ -10,6 +12,7 @@ import { SessionStore } from "./store.js"
 import { faceTitle, FavFaces } from "./favfaces.js"
 import { fitForModel } from "./image-fit.js"
 import { stickerLabel, StickerBook } from "./stickers.js"
+import { applyProviderPatch, providerLabel } from "./provider.js"
 import { createVoice, recordUrl } from "./voice.js"
 
 const HELP = "在的。只有这个群里被 @、句子里有「爱丽丝」，或者接着刚才跟她的对话说，才会回。别的群不会跟着回，回复别人的消息也不会插话。每个人在每个群的对话是分开记的，发送 /reset 只重置你自己在这个群的这段记忆。把表情和「保存表情」一起发过来，或者回复那条表情再说一次，爱丽丝会存下来。人设写在 persona/default.md，保存后你的下一条消息会带上新内容。"
@@ -57,6 +60,10 @@ const depths = new Map()
 const tails = new Map()
 const lingerTimers = new Map()
 const lingerEpoch = new Map()
+let silenceEpoch = 0
+const botTurns = new Map()
+const botListFile = path.join(root, "bot-list.txt")
+let botListCache = { ids: new Set(), mtimeMs: -1 }
 const lastLingerAt = new Map()
 let namingFaces = false
 let active = 0
@@ -87,8 +94,11 @@ if (voices.enabled) {
   log("语音：短句交给本机 GPT-SoVITS，失败就改回文字")
   void voices.warm()
 }
+await applyProviderPatch({ root, homeDir: homedir(), provider: config.dsh.provider })
+log(`接口：${providerLabel(config.dsh.provider)}`)
+log(`管理员：${ADMIN_ID}`)
+await botIds()
 if (config.bot.groups.length === 0) log("群白名单为空，所有群的触发消息都会回复")
-if (config.bot.admins.length === 0) log("管理员列表为空，能触发机器人的人都可以 /reset")
 
 onebot.onEvent = (event) => {
   const action = decide(event, {
@@ -98,6 +108,10 @@ onebot.onEvent = (event) => {
     admins: config.bot.admins,
   })
   if (action.type === "ignore") return
+  if (action.type === "stop" || action.type === "restart" || action.type === "api" || action.type === "reset") {
+    void runAdmin(action)
+    return
+  }
   cancelLinger(action.groupId)
   action.arrivedAt = Date.now()
   action.replyingToHer = replyingToHer(action)
@@ -184,6 +198,7 @@ function flushBurst(key) {
 }
 
 function startJob(key, action) {
+  action.silenceEpoch = silenceEpoch
   const depth = depths.get(key) ?? 0
   if (depth >= 3) {
     log(`群 ${action.groupId} 的 ${action.userId} 排队已满，这轮先不接`)
@@ -227,9 +242,26 @@ function repliedToUserJustNow(groupId, userId) {
 }
 
 async function handle(action) {
+  if (quieted(action)) return
   const key = threadKey(action.groupId, action.userId)
+  if ((await botIds()).has(String(action.userId))) {
+    const next = listedBotTurn(botTurns.get(key), Date.now())
+    botTurns.set(key, { rounds: next.rounds, cooldownUntil: next.cooldownUntil })
+    if (next.action === "silent") {
+      log(`群 ${action.groupId} 的 ${action.userId} 在机器人名单上，先不接`)
+      return
+    }
+    if (next.action === "closing") {
+      log(`群 ${action.groupId} 的 ${action.userId} 已经聊了两轮，收个尾`)
+      await reply(action, BOT_CLOSING)
+      return
+    }
+  }
   if (action.type === "help") {
-    await reply(action, HELP)
+    const extra = String(action.userId) === ADMIN_ID
+      ? "\n管理员可以发 /stop 停下正在跟别人的对话，/restart 重启，/api 看现在的接口，/api 书生 或 /api deepseek 切换。"
+      : ""
+    await reply(action, HELP + extra)
     return
   }
   if (action.type === "poke") {
@@ -244,17 +276,6 @@ async function handle(action) {
     await saveIncomingSticker(action)
     return
   }
-  if (action.type === "reset") {
-    const saved = store.get(key)
-    if (saved?.sessionId) {
-      await acp.closeSession(saved.sessionId, config.workspace).catch((error) => log(`关闭旧会话失败：${error.message}`))
-      await store.delete(key)
-    }
-    personaTimes.delete(key)
-    await reply(action, "你和爱丽丝的这段对话已经重置。")
-    return
-  }
-
   const mode = modeOf(action)
   if (mode === "skip" || mode === "ambient") return
   action.addressed = mode === "direct"
@@ -291,10 +312,12 @@ async function handle(action) {
     followup: action.followup,
   })
   const prompt = promptFor(Boolean(image))
+  if (quieted(action)) return
   let result
   try {
     result = await acp.prompt(session.sessionId, image ? [imageBlock(image), { type: "text", text: prompt }] : prompt)
   } catch (error) {
+    if (quieted(action)) return
     const message = String(error.message)
     const tooManyImages = /too many images/i.test(message)
     if (tooManyImages || (image && /image/i.test(message))) {
@@ -305,11 +328,16 @@ async function handle(action) {
       }
       const keepImage = tooManyImages && Boolean(image)
       try {
+        if (quieted(action)) return
         result = await acp.prompt(session.sessionId, keepImage ? [imageBlock(image), { type: "text", text: promptFor(keepImage) }] : promptFor(false))
       } catch (again) {
+        if (quieted(action)) return
         if (keepImage) {
+          if (quieted(action)) return
           log(`新对话仍然看不了这张图，改为只看文字：${again.message}`)
           result = await acp.prompt(session.sessionId, promptFor(false))
+        } else if (quieted(action)) {
+          return
         } else if (String(again.message).includes("超时")) {
           await reply(action, "想得有点久，这次先不回了。")
           return
@@ -339,6 +367,7 @@ async function handle(action) {
     log(`没有接话：群 ${action.groupId} 的 ${action.userId}`)
     return
   }
+  if (quieted(action)) return
   await deliver(action, aside.silent ? "在的。" : aside.text, true, aside.silent ? "" : aside.voice)
 }
 
@@ -815,6 +844,133 @@ function mediaBrief(media) {
 
 function pause(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function botIds() {
+  try {
+    const info = await stat(botListFile)
+    if (info.mtimeMs === botListCache.mtimeMs) return botListCache.ids
+    const ids = new Set(parseBotList(await readFile(botListFile, "utf8")))
+    botListCache = { ids, mtimeMs: info.mtimeMs }
+    log(`机器人名单 ${ids.size} 个：${botListFile}`)
+    return ids
+  } catch {
+    if (botListCache.mtimeMs !== 0) {
+      botListCache = { ids: new Set(), mtimeMs: 0 }
+      log(`没有读到机器人名单：${botListFile}`)
+    }
+    return botListCache.ids
+  }
+}
+
+function quieted(action) {
+  return action.silenceEpoch !== silenceEpoch
+}
+
+async function runAdmin(action) {
+  const key = threadKey(action.groupId, action.userId)
+  try {
+    if (action.type === "reset") {
+      const saved = store.get(key)
+      if (saved?.sessionId) {
+        await acp.closeSession(saved.sessionId, config.workspace).catch((error) => log(`关闭旧会话失败：${error.message}`))
+        await store.delete(key)
+      }
+      personaTimes.delete(key)
+      lastExchange.delete(key)
+      await reply(action, "你和爱丽丝的这段对话已经重置。")
+      return
+    }
+    if (action.type === "stop") {
+      const targets = stopTargets(action.commandTarget)
+      stopConversations(targets)
+      log(targets.length ? `停下和 ${targets.join("、")} 的对话` : "停下正在进行的对话")
+      await reply(action, targets.length ? "好，先不跟这个人聊了。" : "好，先不跟他们聊了。")
+      return
+    }
+    if (action.type === "restart") {
+      await reply(action, "爱丽丝重启一下。")
+      scheduleRelaunch()
+      await shutdown()
+      return
+    }
+    const choice = parseApiChoice(action.commandTarget)
+    if (!choice) {
+      await reply(action, "可以说 /api 书生，或者 /api deepseek。")
+      return
+    }
+    if (choice === "status") {
+      await reply(action, `现在用的是${providerLabel(config.dsh.provider)}。要换的话，发 /api 书生 或 /api deepseek。`)
+      return
+    }
+    if (choice === config.dsh.provider) {
+      await reply(action, `现在用的就是${providerLabel(choice)}。`)
+      return
+    }
+    await writeProvider(choice)
+    await reply(action, `换成${providerLabel(choice)}了，爱丽丝重启一下。`)
+    scheduleRelaunch()
+    await shutdown()
+  } catch (error) {
+    log(`管理指令失败：${error.message}`)
+    await reply(action, "这次没做成。").catch(() => {})
+  }
+}
+
+function stopConversations(userIds) {
+  silenceEpoch += 1
+  for (const [key, timer] of lingerTimers) {
+    clearTimeout(timer)
+    lingerEpoch.set(key, (lingerEpoch.get(key) ?? 0) + 1)
+  }
+  lingerTimers.clear()
+  const chosen = (key) => userIds.some((id) => key.endsWith(`:${id}`))
+  if (userIds.length === 0) {
+    lastExchange.clear()
+    lastSelfAt.clear()
+    for (const [, bucket] of bursts) clearTimeout(bucket.timer)
+    bursts.clear()
+    acp.cancelActive()
+    return
+  }
+  for (const [key, bucket] of bursts) {
+    if (!chosen(key)) continue
+    clearTimeout(bucket.timer)
+    bursts.delete(key)
+  }
+  for (const key of lastExchange.keys()) {
+    if (chosen(key)) lastExchange.delete(key)
+  }
+  for (const groupId of [...lastSelfAt.keys()]) {
+    if (userIds.some((id) => repliedToUserJustNow(groupId, id))) lastSelfAt.delete(groupId)
+  }
+  for (const key of Object.keys(store.groups)) {
+    if (chosen(key)) acp.cancelSession(store.get(key)?.sessionId)
+  }
+}
+
+async function writeProvider(provider) {
+  const raw = JSON.parse(await readFile(config.file, "utf8"))
+  raw.dsh = { ...(raw.dsh ?? {}), provider }
+  await writeFile(config.file, `${JSON.stringify(raw, null, 2)}\n`, "utf8")
+}
+
+function scheduleRelaunch() {
+  const script = [
+    "Remove-Item Env:DSH_HOME -ErrorAction SilentlyContinue",
+    "Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue",
+    "$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')",
+    "Start-Sleep -Seconds 2",
+    "Set-Location D:\\aicoding\\aris",
+    "npm start",
+  ].join("\r\n")
+  const encoded = Buffer.from(script, "utf16le").toString("base64")
+  const child = spawn("powershell.exe", ["-NoExit", "-EncodedCommand", encoded], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: false,
+  })
+  child.unref()
 }
 
 function enqueue(key, job) {

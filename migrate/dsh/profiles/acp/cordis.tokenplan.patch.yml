@@ -1,0 +1,31 @@
+# 书生 TokenPlan 的 OpenAI 兼容接口。密钥放在 .credentials.yaml 的 TOKENPLAN_API_KEY。
+- id: acp
+  config:
+    provider: tokenplan
+    model: deepseek-v4.1-flash-1017
+
+- id: llm-pi-ai
+  config:
+    providers:
+      tokenplan:
+        displayName: TokenPlan
+        apiKeyEnv: TOKENPLAN_API_KEY
+        api: openai-completions
+        baseURL: https://discovery-api.intern-ai.org.cn/v1
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsReasoningEffort: false
+          supportsUsageInStreaming: true
+          supportsFinishReason: true
+          maxTokensField: max_tokens
+          requiresToolResultName: false
+          requiresAssistantAfterToolResult: false
+          supportsStrictMode: false
+        models:
+          - id: deepseek-v4.1-flash-1017
+            name: DeepSeek-V4.1-Flash
+            contextWindow: 1048576
+            maxTokens: 4096
+            input: [text, image]
+            reasoningEfforts: false

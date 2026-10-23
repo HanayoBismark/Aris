@@ -1,6 +1,7 @@
 import { access, copyFile, readFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { ADMIN_ID } from "./chat.js"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const root = path.resolve(here, "..")
@@ -34,11 +35,12 @@ export async function loadConfig() {
       command: command || (process.platform === "win32" ? "npx.cmd" : "npx"),
       args: args.length > 0 ? args : ["-y", "@deepseek-ai/dsh", "--profile", "acp"],
       replyTimeoutMs: positive(raw.dsh?.replyTimeoutMs, 180000),
+      provider: raw.dsh?.provider === "deepseek" ? "deepseek" : "tokenplan",
     },
     bot: {
       trigger,
       groups: arrayOf(raw.bot?.groups),
-      admins: arrayOf(raw.bot?.admins),
+      admins: [ADMIN_ID],
       toolPolicy,
       personaFile: path.resolve(root, String(raw.bot?.personaFile ?? "persona/default.md")),
       replyWithQuote: raw.bot?.replyWithQuote !== false,

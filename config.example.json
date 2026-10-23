@@ -6,12 +6,13 @@
   "dsh": {
     "command": "",
     "args": [],
-    "replyTimeoutMs": 180000
+    "replyTimeoutMs": 180000,
+    "provider": "tokenplan"
   },
   "bot": {
     "trigger": "mention",
     "groups": [],
-    "admins": [],
+    "admins": ["329919475"],
     "toolPolicy": "web",
     "personaFile": "persona/default.md",
     "replyWithQuote": true,

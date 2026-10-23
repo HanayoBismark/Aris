@@ -124,6 +124,19 @@ export class AcpClient {
     }
   }
 
+  cancelSession(sessionId) {
+    if (!sessionId) return
+    try {
+      this.#send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: String(sessionId) } })
+    } catch {
+      // 进程已经退出时，取消通知送不出去。
+    }
+  }
+
+  cancelActive() {
+    for (const sessionId of this.#active) this.cancelSession(sessionId)
+  }
+
   async stop() {
     const child = this.#child
     this.#ready = null

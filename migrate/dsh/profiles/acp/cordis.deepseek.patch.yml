@@ -1,0 +1,5 @@
+# 直接调用 DeepSeek 官方接口。密钥放在 .credentials.yaml 的 DEEPSEEK_API_KEY。
+- id: acp
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash

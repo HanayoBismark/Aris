@@ -209,6 +209,23 @@ export function parseOutgoing(text) {
   return { parts, reacts }
 }
 
+export const ADMIN_ID = "329919475"
+
+export function parseApiChoice(text) {
+  const value = String(text ?? "").trim().toLowerCase()
+  if (!value) return "status"
+  if (value === "书生" || value === "tokenplan") return "tokenplan"
+  if (value === "deepseek" || value === "官方" || value === "official") return "deepseek"
+  return ""
+}
+
+export function stopTargets(text) {
+  const ids = new Set()
+  for (const match of String(text ?? "").matchAll(/@(\d{5,})/g)) ids.add(match[1])
+  for (const match of String(text ?? "").matchAll(/(?:^|\s)(\d{5,})(?!\d)/g)) ids.add(match[1])
+  return [...ids]
+}
+
 export function decide(event, options) {
   if (isGroupPoke(event)) return decidePoke(event, options)
   if (event?.post_type !== "message" || event?.message_type !== "group") return { type: "ignore" }
@@ -234,20 +251,29 @@ export function decide(event, options) {
     mentioned,
   }
   const admins = (options.admins ?? []).map(String).filter(Boolean)
-  const isAdmin = admins.length === 0 || admins.includes(userId)
+  const isAdmin = admins.includes(userId)
   const triggered = trigger === "all" || (trigger === "mention" && mentioned)
   if (!triggered) return { type: "ignore" }
 
   const command = text.replace(/^\s+/, "")
   if (command === "/help" || command.startsWith("/help ")) return { ...base, type: "help" }
-  if (command === "/reset" || command.startsWith("/reset ")) {
+  const admin = adminCommand(command)
+  if (admin) {
     if (!isAdmin) return { type: "ignore" }
-    return { ...base, type: "reset" }
+    return { ...base, type: admin.type, commandTarget: admin.target }
   }
   const save = stickerSaveRequest(text)
   if (save) return { ...base, type: "save", saveName: save.name }
   if (!text) return { ...base, type: mentioned ? "poke" : "chat" }
   return { ...base, type: "chat" }
+}
+
+function adminCommand(command) {
+  if (command === "/reset" || command.startsWith("/reset ")) return { type: "reset", target: "" }
+  if (command === "/stop" || command.startsWith("/stop ")) return { type: "stop", target: command.slice("/stop".length).trim() }
+  if (command === "/restart" || command.startsWith("/restart ")) return { type: "restart", target: "" }
+  if (command === "/api" || command.startsWith("/api ")) return { type: "api", target: command.slice("/api".length).trim() }
+  return null
 }
 
 function isGroupPoke(event) {
@@ -283,6 +309,28 @@ export function addressMode({ mentioned, text, replyingToHer, replyingToOther, r
   if (replyingToOther || /@\d+/.test(body)) return "skip"
   if (recentWithUser || sheJustRepliedToUser) return "followup"
   return "ambient"
+}
+
+export const BOT_COOLDOWN_MS = 5 * 60 * 1000
+export const BOT_CLOSING = "爱丽丝先去忙了。"
+
+export function parseBotList(text) {
+  const ids = []
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const id = trimmed.split(/\s+/)[0]
+    if (/^\d+$/.test(id)) ids.push(id)
+  }
+  return ids
+}
+
+export function listedBotTurn(state, now, cooldownMs = BOT_COOLDOWN_MS) {
+  const rounds = Number(state?.rounds) || 0
+  const cooldownUntil = Number(state?.cooldownUntil) || 0
+  if (cooldownUntil > now) return { action: "silent", rounds, cooldownUntil }
+  if (rounds >= 2) return { action: "closing", rounds: 0, cooldownUntil: now + cooldownMs }
+  return { action: "allow", rounds: rounds + 1, cooldownUntil: 0 }
 }
 
 export function mergeBurst(actions) {
