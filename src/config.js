@@ -35,7 +35,7 @@ export async function loadConfig() {
       command: command || (process.platform === "win32" ? "npx.cmd" : "npx"),
       args: args.length > 0 ? args : ["-y", "@deepseek-ai/dsh", "--profile", "acp"],
       replyTimeoutMs: positive(raw.dsh?.replyTimeoutMs, 180000),
-      provider: raw.dsh?.provider === "deepseek" ? "deepseek" : "tokenplan",
+      provider: ["deepseek", "qwen"].includes(raw.dsh?.provider) ? raw.dsh.provider : "tokenplan",
     },
     bot: {
       trigger,

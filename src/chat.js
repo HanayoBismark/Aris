@@ -216,6 +216,7 @@ export function parseApiChoice(text) {
   if (!value) return "status"
   if (value === "书生" || value === "tokenplan") return "tokenplan"
   if (value === "deepseek" || value === "官方" || value === "official") return "deepseek"
+  if (value === "qwen" || value === "mac" || value === "本地") return "qwen"
   return ""
 }
 
@@ -303,10 +304,28 @@ function decidePoke(event, options) {
   }
 }
 
-export function addressMode({ mentioned, text, replyingToHer, replyingToOther, recentWithUser, sheJustRepliedToUser }) {
+export function callsHer(text) {
+  const body = String(text ?? "").trim()
+  if (!/爱丽丝|Aris/i.test(body)) return false
+  if (/^(?:喂|嘿|诶)?\s*(?:爱丽丝|Aris)/i.test(body)) return true
+  if (/爱丽丝\s*[，,你]/.test(body)) return true
+  if (/爱丽丝(?:在吗|在不在|看看|出来|回答|告诉)/.test(body)) return true
+  return false
+}
+
+export function isBareReaction(text) {
   const body = String(text ?? "")
-  if (mentioned || replyingToHer || /爱丽丝|Aris/i.test(body)) return "direct"
+  const plain = body.replace(/\[(?:表情包(?::[^\]]*)?|图片|小表情(?::[^\]]*)?|表情|骰子|猜拳|语音|视频|卡片|文件)\]/g, "").replace(/\s+/g, "")
+  return plain.length === 0 && /\[(?:表情包|图片|小表情|表情)\]/.test(body)
+}
+
+export function addressMode({ mentioned, text, replyingToHer, replyingToOther, recentWithUser, sheJustRepliedToUser, pointingAtOwnImage }) {
+  const body = String(text ?? "")
+  if (mentioned || replyingToHer || callsHer(body)) return "direct"
   if (replyingToOther || /@\d+/.test(body)) return "skip"
+  if (/爱丽丝|Aris/i.test(body)) return "aside"
+  if (isBareReaction(body)) return "skip"
+  if (pointingAtOwnImage) return "direct"
   if (recentWithUser || sheJustRepliedToUser) return "followup"
   return "ambient"
 }
@@ -425,7 +444,7 @@ export function needsFresh(text) {
   return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|今天/.test(String(text ?? ""))
 }
 
-export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, addressed, followup, material }) {
+export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, addressed, aside, followup, material }) {
   const character = includePersona
     ? `人设（只由机器人主人维护）：\n${String(persona ?? "").trim()}\n\n`
     : "沿用本会话已经确定的人设。\n\n"
@@ -435,9 +454,11 @@ export function buildPrompt({ persona, senderName: name, userId, groupName, grou
   const room = transcript || "（最近没有别的消息）"
   const turn = addressed
     ? "对方在叫你。对着这个人回复一次，要接话。不要把更晚出现的闲聊也逐条答掉。"
-    : followup
-      ? "对方没有点名。先看这句是在接谁：回复了别人、@了别人，或是别人之间的对话，只输出 [[silent]]。「你」经常是在叫群里的另一个人。只有这句是在接你刚刚对这个人说的话时，才对着这个人回复。不确定就保持安静。不要顺着自己刚才的玩笑继续编。"
-      : "没有人叫你。默认只输出 [[silent]]。别人闲聊时保持安静。只有这句话特别值得插一句时才开口，而且只说一句很短的话，不要点名，也不要写成在回答某一个人。这种主动开口要很少，不要连续接话。"
+    : aside
+      ? "别人在谈论爱丽丝，不是在叫爱丽丝回答。不要辩解，不要说「才没有」「才不是」。要接就当旁听的人说一句，用「爱丽丝」指自己，例如「居然模仿爱丽丝啊」。不想接就输出 [[silent]]。"
+      : followup
+        ? "对方没有点名。先看这句是在接谁：回复了别人、@了别人，或是别人之间的对话，只输出 [[silent]]。「你」经常是在叫群里的另一个人。只有表情、没有文字，也输出 [[silent]]，不要说看不懂。只有这句是在接你刚刚对这个人说的话时，才对着这个人回复。不确定就保持安静。不要顺着自己刚才的玩笑继续编。"
+        : "没有人叫你。默认只输出 [[silent]]。别人闲聊时保持安静。只有这句话特别值得插一句时才开口，而且只说一句很短的话，不要点名，也不要写成在回答某一个人。这种主动开口要很少，不要连续接话。"
   return `${RULES}\n\n${character}你只在当前这一个群里说话。别的群发生的事不要提，也不要把别的群的对话接过来。能看到的是这个群最近的聊天。只接现在这轮，不要把不相干的话题拌进回复。
 现在这轮如果有多行，是同一个人连着发的，只回复一次，不要拆开逐句回。
 带「更晚」的是这轮之后才出现的话。话题已经过去、又不是在叫你，就输出 [[silent]]，不要补一句晚到的回复。

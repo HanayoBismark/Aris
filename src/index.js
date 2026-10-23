@@ -214,7 +214,6 @@ function startJob(key, action) {
 function modeOf(action) {
   const key = threadKey(action.groupId, action.userId)
   const toHer = action.replyingToHer ?? replyingToHer(action)
-  if (pointingAtOwnImage(action)) return "direct"
   return addressMode({
     mentioned: Boolean(action.mentioned),
     text: action.text,
@@ -222,6 +221,7 @@ function modeOf(action) {
     replyingToOther: action.replyingToOther ?? (Boolean(action.replyTo) && !toHer),
     recentWithUser: Date.now() - (lastExchange.get(key) ?? 0) < FOLLOW_MS,
     sheJustRepliedToUser: repliedToUserJustNow(action.groupId, action.userId),
+    pointingAtOwnImage: pointingAtOwnImage(action),
   })
 }
 
@@ -260,7 +260,7 @@ async function handle(action) {
   }
   if (action.type === "help") {
     const extra = String(action.userId) === ADMIN_ID
-      ? "\n管理员可以发 /stop 停下正在跟别人的对话，/restart 重启，/api 看现在的接口，/api 书生 或 /api deepseek 切换。"
+      ? "\n管理员可以发 /stop 停下正在跟别人的对话，/restart 重启，/api 看现在的接口，/api 书生、/api deepseek 或 /api qwen 切换。"
       : ""
     await reply(action, HELP + extra)
     return
@@ -281,6 +281,7 @@ async function handle(action) {
   if (mode === "skip" || mode === "ambient") return
   action.addressed = mode === "direct"
   action.followup = mode === "followup"
+  action.aside = mode === "aside"
   if (action.followup && Date.now() - (action.arrivedAt ?? Date.now()) > STALE_FOLLOW_MS) {
     log(`群 ${action.groupId} 的 ${action.userId} 这句已经过去了`)
     return
@@ -316,6 +317,7 @@ async function handle(action) {
     transcript,
     notes: notebook.notes(action.groupId),
     addressed: action.addressed,
+    aside: action.aside,
     followup: action.followup,
     material,
   })
@@ -904,11 +906,11 @@ async function runAdmin(action) {
     }
     const choice = parseApiChoice(action.commandTarget)
     if (!choice) {
-      await reply(action, "可以说 /api 书生，或者 /api deepseek。")
+      await reply(action, "可以说 /api 书生、/api deepseek，或者 /api qwen。")
       return
     }
     if (choice === "status") {
-      await reply(action, `现在用的是${providerLabel(config.dsh.provider)}。要换的话，发 /api 书生 或 /api deepseek。`)
+      await reply(action, `现在用的是${providerLabel(config.dsh.provider)}。要换的话，发 /api 书生、/api deepseek 或 /api qwen。`)
       return
     }
     if (choice === config.dsh.provider) {

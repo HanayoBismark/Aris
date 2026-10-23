@@ -4,10 +4,13 @@ import path from "node:path"
 const FILES = {
   tokenplan: "cordis.tokenplan.patch.yml",
   deepseek: "cordis.deepseek.patch.yml",
+  qwen: "cordis.qwen.patch.yml",
 }
 
 export function providerLabel(provider) {
-  return provider === "deepseek" ? "DeepSeek 官方" : "书生"
+  if (provider === "deepseek") return "DeepSeek 官方"
+  if (provider === "qwen") return "Mac 上的 Qwen"
+  return "书生"
 }
 
 export async function applyProviderPatch({ root, homeDir, provider }) {

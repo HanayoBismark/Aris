@@ -1,0 +1,31 @@
+# Mac Studio 上的 Qwen3.5-122B-A10B 6-bit。Windows 通过 SSH 转到 127.0.0.1:18080。
+- id: acp
+  config:
+    provider: qwen
+    model: /Users/ljw/Aris/models/Qwen3.5-122B-A10B-6bit
+
+- id: llm-pi-ai
+  config:
+    providers:
+      qwen:
+        displayName: Qwen
+        apiKeyEnv: QWEN_API_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:18080/v1
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsReasoningEffort: false
+          supportsUsageInStreaming: true
+          supportsFinishReason: true
+          maxTokensField: max_tokens
+          requiresToolResultName: false
+          requiresAssistantAfterToolResult: false
+          supportsStrictMode: false
+        models:
+          - id: /Users/ljw/Aris/models/Qwen3.5-122B-A10B-6bit
+            name: Qwen3.5-122B-A10B-6bit
+            contextWindow: 262144
+            maxTokens: 2048
+            input: [text, image]
+            reasoningEfforts: false
