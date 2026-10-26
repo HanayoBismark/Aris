@@ -5,7 +5,7 @@ import path from "node:path"
 import test from "node:test"
 import { PassThrough } from "node:stream"
 import { AcpClient } from "../src/acp-client.js"
-import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, needsFresh, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken } from "../src/chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, namesSomeoneElse, needsFresh, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, quietOrder, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken, youForOther } from "../src/chat.js"
 import { faceTitle } from "../src/favfaces.js"
 import { formatTranscript } from "../src/room.js"
 import { SessionStore } from "../src/store.js"
@@ -88,6 +88,11 @@ test("只有指定管理员能停下对话、重启和切换接口", () => {
   assert.equal(parseApiChoice("官方"), "deepseek")
   assert.equal(parseApiChoice("qwen"), "qwen")
   assert.equal(parseApiChoice("别的"), "")
+  assert.equal(quietOrder("暂时安静一会儿"), "quiet")
+  assert.equal(quietOrder("爱丽丝，先安静一会儿", { toHer: true }), "quiet")
+  assert.equal(quietOrder("你暂时安静一会儿"), "")
+  assert.equal(quietOrder("可以说话了"), "resume")
+  assert.equal(quietOrder("今天好热"), "")
 })
 
 test("人设只在需要时放进提示词", () => {
@@ -208,6 +213,9 @@ test("戳一戳、保存表情和发出表情", () => {
   assert.deepEqual(outgoing.reacts, ["76"])
   assert.equal(outgoing.parts.some((part) => part.type === "dice"), true)
   assert.equal(outgoing.parts.some((part) => part.type === "text" && part.text.includes("[[")), false)
+  const bare = parseOutgoing("在的 [[探头]]")
+  assert.equal(bare.parts.some((part) => part.type === "sticker" && part.name === "探头"), true)
+  assert.equal(bare.parts.some((part) => part.type === "text" && part.text.includes("[[")), false)
   assert.equal(isAddressed({ mentioned: true, text: "今天吃什么" }), true)
   assert.equal(isAddressed({ mentioned: false, text: "爱丽丝在吗" }), true)
   assert.equal(isAddressed({ mentioned: false, text: "今天吃什么" }), false)
@@ -232,6 +240,14 @@ test("戳一戳、保存表情和发出表情", () => {
   assert.equal(addressMode({ text: "爱丽丝会唱歌吗" }), "direct")
   assert.equal(addressMode({ text: "[表情包]", recentWithUser: true }), "skip")
   assert.equal(addressMode({ text: "[表情包]", replyingToHer: true }), "direct")
+  assert.equal(namesSomeoneElse("鱼你想要语音功能吗", ["鱼", "爱丽丝"]), true)
+  assert.equal(namesSomeoneElse("钓鱼去了", ["鱼"]), false)
+  assert.equal(youForOther("你想要语音吗", { self: false, name: "鱼" }), true)
+  assert.equal(youForOther("你刚说的是哪句", { self: true, name: "爱丽丝" }), false)
+  assert.equal(addressMode({ text: "鱼你想要语音吗", recentWithUser: true, speakerNames: ["鱼"] }), "skip")
+  assert.equal(addressMode({ text: "你想要语音吗", recentWithUser: true, previous: { self: false, name: "鱼" } }), "skip")
+  assert.equal(addressMode({ text: "你刚说的是哪句", sheJustRepliedToUser: true, previous: { self: true } }), "followup")
+  assert.equal(addressMode({ text: "在干嘛", recentWithUser: true, previous: { self: true } }), "followup")
   assert.match(buildPrompt({ text: "是不是在模仿爱丽丝啊", aside: true }), /居然模仿爱丽丝啊/)
   assert.match(buildPrompt({ text: "是不是在模仿爱丽丝啊", aside: true }), /才没有/)
   assert.match(buildPrompt({ text: "在干嘛", followup: true, transcript: "鱼：戳了爱丽丝\n爱丽丝：在的。" }), /别人之间的对话/)

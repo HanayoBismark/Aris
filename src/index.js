@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process"
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { homedir } from "node:os"
 import path from "node:path"
-import { AcpClient } from "./acp-client.js"
-import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
+import { ModelClient } from "./model.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, callsHer, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, namesSomeoneElse, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, quietOrder, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
 import { gatherSearch } from "./search.js"
 import { loadConfig, root } from "./config.js"
+import { formatDialogue, Memory } from "./memory.js"
 import { Notebook } from "./notebook.js"
 import { OneBotClient } from "./onebot.js"
 import { formatTranscript, GroupLog } from "./room.js"
@@ -13,10 +13,10 @@ import { SessionStore } from "./store.js"
 import { faceTitle, FavFaces } from "./favfaces.js"
 import { fitForModel } from "./image-fit.js"
 import { stickerLabel, StickerBook } from "./stickers.js"
-import { applyProviderPatch, providerLabel } from "./provider.js"
+import { providerLabel } from "./provider.js"
 import { createVoice, recordUrl } from "./voice.js"
 
-const HELP = "在的。只有这个群里被 @、句子里有「爱丽丝」，或者接着刚才跟她的对话说，才会回。别的群不会跟着回，回复别人的消息也不会插话。每个人在每个群的对话是分开记的，发送 /reset 只重置你自己在这个群的这段记忆。把表情和「保存表情」一起发过来，或者回复那条表情再说一次，爱丽丝会存下来。人设写在 persona/default.md，保存后你的下一条消息会带上新内容。"
+const HELP = "在的。只有这个群里被 @、句子里有「爱丽丝」，或者接着刚才跟她的对话说，才会回。别的群不会跟着回，回复别人的消息也不会插话。她看得到最近的群聊，记得和你最近说过的话，也记得记下的事。发送 /reset 会忘掉和你的这段对话，记下的事还在。把表情和「保存表情」一起发过来，或者回复那条表情再说一次，爱丽丝会存下来。人设写在 persona/default.md，保存后你的下一条消息会带上新内容。"
 const POKE = "在的，直接说就行。"
 const EMPTY_REPLY = "我这次没组织好回复，换种说法再试一次？"
 const NUDGES = [
@@ -47,6 +47,8 @@ const fav = new FavFaces(config.favDir)
 await fav.load()
 const notebook = new Notebook(config.noteFile)
 await notebook.load()
+const memory = new Memory(path.join(root, "data", "memory.json"))
+await memory.load()
 const room = new GroupLog()
 const nudgeAt = new Map()
 const recentImages = new Map()
@@ -54,7 +56,6 @@ const recentImageJobs = new Map()
 const lastExchange = new Map()
 const lastSelfAt = new Map()
 const ownMessageIds = new Map()
-const personaTimes = new Map()
 const groupNames = new Map()
 const bursts = new Map()
 const depths = new Map()
@@ -62,6 +63,7 @@ const tails = new Map()
 const lingerTimers = new Map()
 const lingerEpoch = new Map()
 let silenceEpoch = 0
+const quietGroups = new Set()
 const botTurns = new Map()
 const botListFile = path.join(root, "bot-list.txt")
 let botListCache = { ids: new Set(), mtimeMs: -1 }
@@ -70,11 +72,8 @@ let namingFaces = false
 let active = 0
 const waiters = []
 
-const acp = new AcpClient({
-  command: config.dsh.command,
-  args: config.dsh.args,
-  cwd: root,
-  toolPolicy: config.bot.toolPolicy,
+const model = new ModelClient({
+  provider: config.dsh.provider,
   replyTimeoutMs: config.dsh.replyTimeoutMs,
   log,
 })
@@ -86,17 +85,15 @@ const onebot = new OneBotClient({
 
 log(`配置：${config.file}`)
 log(`触发方式：${config.bot.trigger === "all" ? "群里每条消息" : "只有 @ 机器人"}`)
-log("对话记忆：每个 QQ 号单独一段，也能看到最近的群聊")
+log("对话记忆：每个人最近 8 轮、群里最近 20 句，加上记事本")
 log(`已保存表情：${book.names().length} 个`)
 log(`记事本：${Object.values(notebook.groups).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0)} 条`)
-log(`工具权限：${policyLabel(config.bot.toolPolicy)}`)
 const voices = createVoice({ config: config.voice, dir: path.join(root, "data", "voice"), log })
 if (voices.enabled) {
   log("语音：短句交给本机 GPT-SoVITS，失败就改回文字")
   void voices.warm()
 }
-await applyProviderPatch({ root, homeDir: homedir(), provider: config.dsh.provider })
-log(`接口：${providerLabel(config.dsh.provider)}`)
+log(`接口：${providerLabel(config.dsh.provider)}，直接请求，不经过 dsh`)
 log(`管理员：${ADMIN_ID}`)
 await botIds()
 if (config.bot.groups.length === 0) log("群白名单为空，所有群的触发消息都会回复")
@@ -117,6 +114,16 @@ onebot.onEvent = (event) => {
   action.arrivedAt = Date.now()
   action.replyingToHer = replyingToHer(action)
   rememberLine(action)
+  if (String(action.userId) === ADMIN_ID && action.type === "chat") {
+    const order = quietOrder(action.text, {
+      toHer: Boolean(action.mentioned || action.replyingToHer || callsHer(action.text)),
+    })
+    if (order && !namesSomeoneElse(action.text, heardBefore(action).names)) {
+      void setQuiet(action, order)
+      return
+    }
+  }
+  if (heldBack(action)) return
   if (action.media?.length) {
     void rememberImage(threadKey(action.groupId, action.userId), action.media.at(-1))
   }
@@ -152,7 +159,6 @@ onebot.onReady = () => {
   void repairStickerNames()
 }
 onebot.start()
-acp.start().catch((error) => log(`dsh 启动失败：${error.message}。收到群消息时会再试一次`))
 
 let shuttingDown = false
 const shutdown = async () => {
@@ -160,7 +166,7 @@ const shutdown = async () => {
   shuttingDown = true
   log("正在退出")
   onebot.stop()
-  await acp.stop()
+  model.cancelAll()
   process.exit(0)
 }
 process.on("SIGINT", () => { void shutdown() })
@@ -214,6 +220,7 @@ function startJob(key, action) {
 function modeOf(action) {
   const key = threadKey(action.groupId, action.userId)
   const toHer = action.replyingToHer ?? replyingToHer(action)
+  const heard = heardBefore(action)
   return addressMode({
     mentioned: Boolean(action.mentioned),
     text: action.text,
@@ -222,7 +229,23 @@ function modeOf(action) {
     recentWithUser: Date.now() - (lastExchange.get(key) ?? 0) < FOLLOW_MS,
     sheJustRepliedToUser: repliedToUserJustNow(action.groupId, action.userId),
     pointingAtOwnImage: pointingAtOwnImage(action),
+    speakerNames: heard.names,
+    previous: heard.previous,
   })
+}
+
+function heardBefore(action) {
+  const skip = new Set((action.messageIds ?? [action.messageId]).map((id) => String(id ?? "")).filter(Boolean))
+  const names = []
+  let previous = null
+  for (const line of [...room.recent(action.groupId)].reverse()) {
+    if (skip.has(String(line.id ?? ""))) continue
+    if (!previous && (line.self || line.userId !== String(action.userId))) previous = line
+    if (line.self || line.userId === String(action.userId)) continue
+    const name = String(line.name ?? "").trim()
+    if (name && name !== "群友" && !names.includes(name)) names.push(name)
+  }
+  return { names, previous }
 }
 
 function pointingAtOwnImage(action) {
@@ -260,7 +283,7 @@ async function handle(action) {
   }
   if (action.type === "help") {
     const extra = String(action.userId) === ADMIN_ID
-      ? "\n管理员可以发 /stop 停下正在跟别人的对话，/restart 重启，/api 看现在的接口，/api 书生、/api deepseek 或 /api qwen 切换。"
+      ? "\n管理员可以说「暂时安静一会儿」，这个群就先不回别人；说「可以说话了」再开口。也可以发 /stop 停下正在跟别人的对话，/restart 重启，/api 看现在的接口，/api 书生、/api deepseek 或 /api qwen 切换。"
       : ""
     await reply(action, HELP + extra)
     return
@@ -288,13 +311,10 @@ async function handle(action) {
   }
   if (action.addressed) lastExchange.set(key, Date.now())
 
-  const personaFile = await stat(config.bot.personaFile)
   const persona = await readFile(config.bot.personaFile, "utf8")
   const groupName = await groupNameOf(action.groupId)
   const image = await imageForTurn(key, action)
-  let session = image ? await replaceSession(key) : await sessionFor(key)
-  if (image) log(`看图换一段新对话，只带这一张`)
-  let includePersona = Boolean(image) || session.fresh || personaTimes.get(key) !== personaFile.mtimeMs
+  if (image) log(`这轮带上图片`)
   const catalog = await stickerCatalog()
   const transcript = formatTranscript(room.recent(action.groupId), action.messageIds ?? action.messageId)
   let material = ""
@@ -310,12 +330,13 @@ async function handle(action) {
     groupName,
     groupId: action.groupId,
     text: action.text,
-    includePersona,
+    includePersona: true,
     stickerCatalog: catalog,
     hasImage,
     carriedImage: Boolean(action.carriedImage),
     transcript,
     notes: notebook.notes(action.groupId),
+    dialogue: formatDialogue(memory.recall(key), action.senderName),
     addressed: action.addressed,
     aside: action.aside,
     followup: action.followup,
@@ -325,51 +346,38 @@ async function handle(action) {
   if (quieted(action)) return
   let result
   try {
-    result = await acp.prompt(session.sessionId, image ? [imageBlock(image), { type: "text", text: prompt }] : prompt)
+    result = await model.complete(key, image ? [imageBlock(image), { type: "text", text: prompt }] : prompt)
   } catch (error) {
-    if (quieted(action)) return
-    const message = String(error.message)
-    const tooManyImages = /too many images/i.test(message)
-    if (tooManyImages || (image && /image/i.test(message))) {
-      log(tooManyImages ? `对话里的图片太多，换一段新的再试：${message}` : `看图失败，改为只看文字：${message}`)
-      if (tooManyImages) {
-        session = await replaceSession(key)
-        includePersona = true
-      }
-      const keepImage = tooManyImages && Boolean(image)
+    if (quieted(action) || cancelled(error)) return
+    if (image && /image|vision|multimodal/i.test(String(error.message))) {
+      log(`看图失败，改为只看文字：${error.message}`)
       try {
-        if (quieted(action)) return
-        result = await acp.prompt(session.sessionId, keepImage ? [imageBlock(image), { type: "text", text: promptFor(keepImage) }] : promptFor(false))
+        result = await model.complete(key, promptFor(false))
       } catch (again) {
-        if (quieted(action)) return
-        if (keepImage) {
-          if (quieted(action)) return
-          log(`新对话仍然看不了这张图，改为只看文字：${again.message}`)
-          result = await acp.prompt(session.sessionId, promptFor(false))
-        } else if (quieted(action)) {
-          return
-        } else if (String(again.message).includes("超时")) {
+        if (quieted(action) || cancelled(again)) return
+        if (String(again.message).includes("超时")) {
           await reply(action, "想得有点久，这次先不回了。")
           return
-        } else {
-          throw again
         }
+        throw again
       }
-    } else if (message.includes("超时")) {
+    } else if (String(error.message).includes("超时")) {
       await reply(action, "想得有点久，这次先不回了。")
       return
     } else {
       throw error
     }
   }
-  personaTimes.set(key, personaFile.mtimeMs)
+  logModel(result)
   const aside = takeAsides(result.text)
   const added = await notebook.add(action.groupId, aside.notes)
   if (added.length > 0) log(`记下：${added.join("；")}`)
   if (aside.keeps[0]) {
     const kept = await keepSticker(action, aside.keeps[0])
     if (kept && !aside.text.trim()) {
-      await reply(action, `收下了。之后可以用「${kept.name}」发出来。`)
+      const line = `收下了。之后可以用「${kept.name}」发出来。`
+      await memory.add(key, action.text, line)
+      await reply(action, line)
       return
     }
   }
@@ -377,33 +385,27 @@ async function handle(action) {
     log(`没有接话：群 ${action.groupId} 的 ${action.userId}`)
     return
   }
-  if (quieted(action)) return
+  if (quieted(action) || heldBack(action)) return
+  const spoken = aside.silent ? "在的。" : replyHeard(aside)
+  await memory.add(key, action.text, spoken)
   await deliver(action, aside.silent ? "在的。" : aside.text, true, aside.silent ? "" : aside.voice)
 }
 
-async function replaceSession(key) {
-  const saved = store.get(key)
-  if (saved?.sessionId) {
-    await acp.closeSession(saved.sessionId, config.workspace).catch((error) => log(`关闭旧会话失败：${error.message}`))
-    await store.delete(key)
-  }
-  personaTimes.delete(key)
-  return sessionFor(key)
+function replyHeard(aside) {
+  const text = String(aside.text ?? "").trim()
+  const voice = String(aside.voice ?? "").trim()
+  if (text && voice) return `${text}（并念了：${voice}）`
+  return text || voice
 }
 
-async function sessionFor(key) {
-  const saved = store.get(key)
-  if (saved?.sessionId && saved.cwd === config.workspace) {
-    try {
-      await acp.resumeSession(saved.sessionId, config.workspace)
-      return { sessionId: saved.sessionId, fresh: false }
-    } catch (error) {
-      log(`对话 ${key} 的旧会话恢复失败，改为新建：${error.message}`)
-    }
-  }
-  const sessionId = await acp.createSession(config.workspace)
-  await store.set(key, { sessionId, cwd: config.workspace })
-  return { sessionId, fresh: true }
+function logModel(result) {
+  const first = (result.ttftMs / 1000).toFixed(1)
+  const total = (result.elapsedMs / 1000).toFixed(1)
+  log(`模型首字 ${first} 秒，整段 ${total} 秒`)
+}
+
+function cancelled(error) {
+  return String(error?.message ?? "").includes("已取消")
 }
 
 async function groupNameOf(groupId) {
@@ -422,14 +424,47 @@ async function reply(action, text) {
   await deliver(action, text, false)
 }
 
+function heldBack(action) {
+  return quietGroups.has(String(action.groupId ?? "")) && String(action.userId ?? "") !== ADMIN_ID
+}
+
+async function setQuiet(action, order) {
+  const groupId = String(action.groupId)
+  if (order === "quiet") {
+    const already = quietGroups.has(groupId)
+    quietGroups.add(groupId)
+    cancelLinger(groupId)
+    for (const [key, bucket] of bursts) {
+      if (!key.startsWith(`${groupId}:`) || key.endsWith(`:${ADMIN_ID}`)) continue
+      clearTimeout(bucket.timer)
+      bursts.delete(key)
+    }
+    for (const key of model.activeKeys()) {
+      if (key === `linger:${groupId}`) model.cancel(key)
+      if (key.startsWith(`${groupId}:`) && !key.endsWith(`:${ADMIN_ID}`)) model.cancel(key)
+    }
+    log(already ? `群 ${groupId} 还在安静` : `群 ${groupId} 先安静`)
+    await reply(action, already ? "已经安静着。" : "好，先安静一会儿。")
+    return
+  }
+  if (!quietGroups.has(groupId)) {
+    await reply(action, "现在没有在安静。")
+    return
+  }
+  quietGroups.delete(groupId)
+  log(`群 ${groupId} 可以说话了`)
+  await reply(action, "好，爱丽丝可以说话了。")
+}
+
 async function deliver(action, text, pauseFirst, voice) {
+  if (heldBack(action)) return
   const planned = planVoice(text, voice, pauseFirst && !action.linger && action.type === "chat")
   const bubbles = planned.body ? (pauseFirst ? splitBubbles(planned.body) : [planned.body]) : []
   const pieces = bubbles.length > 0 ? bubbles : (planned.speak ? [] : [String(text ?? "").trim()])
   for (let index = 0; index < pieces.length; index += 1) {
     if (index === 0 && pauseFirst) await pause(700 + Math.floor(Math.random() * 900))
     if (index > 0) await pause(1000 + Math.floor(Math.random() * 1000))
-    await sendBubble(action, pieces[index], index === 0)
+    await sendBubble(action, pieces[index], index === 0 && !planned.speak)
   }
   if (planned.speak) await sendVoice(action, planned.speak, pieces.length === 0, pauseFirst && pieces.length === 0)
   if (pauseFirst && !action.linger) scheduleLinger(action.groupId)
@@ -439,9 +474,7 @@ async function sendVoice(action, line, quoteThis, pauseFirst) {
   if (pauseFirst) await pause(700 + Math.floor(Math.random() * 900))
   try {
     const file = await voices.synthesize(line)
-    const segments = []
-    if (quoteThis && shouldQuote(action)) segments.push({ type: "reply", data: { id: String(action.messageId) } })
-    segments.push({ type: "record", data: { file: recordUrl(file) } })
+    const segments = [{ type: "record", data: { file: recordUrl(file) } }]
     const sent = await onebot.sendGroupSegments(action.groupId, segments)
     const sentId = sentMessageId(sent)
     room.push(action.groupId, {
@@ -450,11 +483,10 @@ async function sendVoice(action, line, quoteThis, pauseFirst) {
       userId: onebot.selfId,
       text: `[语音]${line}`,
       self: true,
-      to: quoteThis && shouldQuote(action) ? action.userId : "",
+      to: "",
     })
     if (sentId) rememberOwnMessage(action.groupId, sentId)
     lastSelfAt.set(action.groupId, Date.now())
-    if (quoteThis && shouldQuote(action)) lastExchange.set(threadKey(action.groupId, action.userId), Date.now())
     log(`已发语音给群 ${action.groupId} 的 ${action.userId}`)
   } catch (error) {
     log(`语音没合成出来，改为文字：${error.message}`)
@@ -504,12 +536,14 @@ function cancelLinger(groupId) {
   clearTimeout(lingerTimers.get(key))
   lingerTimers.delete(key)
   lingerEpoch.set(key, (lingerEpoch.get(key) ?? 0) + 1)
+  model.cancel(`linger:${key}`)
 }
 
 async function maybeLinger(groupId) {
   lingerTimers.delete(groupId)
   const epoch = lingerEpoch.get(groupId) ?? 0
   if (active + waiters.length >= config.bot.maxParallel) return
+  if (quietGroups.has(String(groupId))) return
   const lines = room.recent(groupId)
   const lastIndex = lines.findLastIndex((line) => line.self)
   if (lastIndex < 0) return
@@ -517,17 +551,12 @@ async function maybeLinger(groupId) {
   lastLingerAt.set(groupId, Date.now())
   try {
     const persona = await readFile(config.bot.personaFile, "utf8")
-    const sessionId = await acp.createSession(config.workspace)
-    let result
-    try {
-      result = await acp.prompt(sessionId, buildLingerPrompt({
-        persona,
-        transcript: formatTranscript(lines),
-        lastLine: lines[lastIndex].text,
-      }))
-    } finally {
-      await acp.closeSession(sessionId, config.workspace).catch((error) => log(`关闭补话会话失败：${error.message}`))
-    }
+    const result = await model.complete(`linger:${groupId}`, buildLingerPrompt({
+      persona,
+      transcript: formatTranscript(lines),
+      lastLine: lines[lastIndex].text,
+    }))
+    logModel(result)
     if ((lingerEpoch.get(groupId) ?? 0) !== epoch) return
     const aside = takeAsides(result.text)
     const line = aside.text.split(/\n/).map((part) => part.trim()).filter(Boolean)[0] ?? ""
@@ -546,6 +575,7 @@ async function maybeLinger(groupId) {
     }, line, false)
     log(`群 ${groupId} 补了一句`)
   } catch (error) {
+    if (cancelled(error)) return
     log(`补话失败：${error.message}`)
   }
 }
@@ -559,7 +589,7 @@ function replyingToHer(action) {
 
 function shouldQuote(action) {
   if (!config.bot.replyWithQuote || !action.messageId) return false
-  if (action.type === "chat") return Boolean(action.addressed || action.followup)
+  if (action.type === "chat") return Boolean(action.addressed)
   return true
 }
 
@@ -607,6 +637,9 @@ function composeReply(text) {
   }
   const ending = segments.at(-1)
   if (ending?.type === "text") ending.data.text = ending.data.text.trimEnd()
+  const sentStickers = segments.filter((segment) => segment.type === "image").length
+  if (sentStickers > 0) log(`这条带了 ${sentStickers} 张表情`)
+  else if (missingSticker) log("模型点了表情，收藏里没有同名的")
   return { segments, reacts: parsed.reacts, missingSticker }
 }
 
@@ -782,16 +815,11 @@ async function captionSticker(file) {
   const bytes = await readFile(file)
   const fitted = await fitForModel(bytes)
   if (!fitted) return ""
-  const sessionId = await acp.createSession(config.workspace)
-  try {
-    const result = await acp.prompt(sessionId, [
-      { type: "image", mimeType: fitted.mimeType, data: fitted.data },
-      { type: "text", text: "这是一张 QQ 表情。只输出一个 2 到 8 个字的中文名字，描述画面或情绪。不要解释，不要调用工具，不要加标点。不要输出「动画表情」。" },
-    ])
-    return faceTitle(result.text)
-  } finally {
-    await acp.closeSession(sessionId, config.workspace).catch(() => {})
-  }
+  const result = await model.complete("caption", [
+    { type: "image", mimeType: fitted.mimeType, data: fitted.data },
+    { type: "text", text: "这是一张 QQ 表情。只输出一个 2 到 8 个字的中文名字，描述画面或情绪。不要解释，不要调用工具，不要加标点。不要输出「动画表情」。" },
+  ])
+  return faceTitle(result.text)
 }
 
 async function repairStickerNames() {
@@ -881,12 +909,9 @@ async function runAdmin(action) {
   const key = threadKey(action.groupId, action.userId)
   try {
     if (action.type === "reset") {
-      const saved = store.get(key)
-      if (saved?.sessionId) {
-        await acp.closeSession(saved.sessionId, config.workspace).catch((error) => log(`关闭旧会话失败：${error.message}`))
-        await store.delete(key)
-      }
-      personaTimes.delete(key)
+      model.cancel(key)
+      if (store.get(key)) await store.delete(key)
+      await memory.delete(key)
       lastExchange.delete(key)
       await reply(action, "你和爱丽丝的这段对话已经重置。")
       return
@@ -940,7 +965,7 @@ function stopConversations(userIds) {
     lastSelfAt.clear()
     for (const [, bucket] of bursts) clearTimeout(bucket.timer)
     bursts.clear()
-    acp.cancelActive()
+    model.cancelAll()
     return
   }
   for (const [key, bucket] of bursts) {
@@ -954,8 +979,8 @@ function stopConversations(userIds) {
   for (const groupId of [...lastSelfAt.keys()]) {
     if (userIds.some((id) => repliedToUserJustNow(groupId, id))) lastSelfAt.delete(groupId)
   }
-  for (const key of Object.keys(store.groups)) {
-    if (chosen(key)) acp.cancelSession(store.get(key)?.sessionId)
+  for (const key of model.activeKeys()) {
+    if (chosen(key)) model.cancel(key)
   }
 }
 
@@ -1001,12 +1026,6 @@ function limit(job) {
       job().then(resolve, reject).finally(release)
     })
   })
-}
-
-function policyLabel(policy) {
-  if (policy === "allow") return "允许全部工具"
-  if (policy === "web") return "只允许 web_search 和 web_fetch"
-  return "拒绝全部工具"
 }
 
 function release() {

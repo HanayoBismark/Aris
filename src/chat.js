@@ -167,8 +167,10 @@ export function shouldCarryImage({ addressed, text, ageMs }) {
   return Boolean(addressed) || refersToImage(text)
 }
 
+const RESERVED_MARK = new Set(["silent", "dice", "rps", "voice", "remember", "keep", "face", "sticker", "react"])
+
 export function parseOutgoing(text) {
-  const pattern = /\[\[(face|sticker|react):([^\]\n]{1,24})\]\]|\[\[(dice|rps)\]\]/g
+  const pattern = /\[\[(face|sticker|react):([^\]\n]{1,24})\]\]|\[\[(dice|rps)\]\]|\[\[([^\]:\n]{1,16})\]\]/g
   const source = String(text ?? "")
   const parts = []
   const reacts = []
@@ -202,6 +204,9 @@ export function parseOutgoing(text) {
         stickers += 1
         parts.push({ type: "sticker", name })
       }
+    } else if (match[4] && stickers < 1 && !RESERVED_MARK.has(match[4].trim())) {
+      stickers += 1
+      parts.push({ type: "sticker", name: match[4].trim() })
     }
   }
   const tail = source.slice(cursor)
@@ -304,6 +309,18 @@ function decidePoke(event, options) {
   }
 }
 
+export function quietOrder(text, { toHer = false } = {}) {
+  const body = String(text ?? "").replace(/\s+/g, "")
+  if (!body) return ""
+  let order = ""
+  if (/可以说话了|不用安静了|可以开口了/.test(body)) order = "resume"
+  else if (/暂时安静(?:一会儿|一会)?|先安静(?:一会儿|一会)|先别回复/.test(body)) order = "quiet"
+  if (!order) return ""
+  if (/[你妳您]/.test(body) && !toHer) return ""
+  if (toHer || body.length <= 12) return order
+  return ""
+}
+
 export function callsHer(text) {
   const body = String(text ?? "").trim()
   if (!/爱丽丝|Aris/i.test(body)) return false
@@ -319,10 +336,30 @@ export function isBareReaction(text) {
   return plain.length === 0 && /\[(?:表情包|图片|小表情|表情)\]/.test(body)
 }
 
-export function addressMode({ mentioned, text, replyingToHer, replyingToOther, recentWithUser, sheJustRepliedToUser, pointingAtOwnImage }) {
+export function namesSomeoneElse(text, names) {
+  const body = String(text ?? "").trim()
+  if (!body || callsHer(body)) return false
+  const list = [...new Set((Array.isArray(names) ? names : []).map((name) => String(name ?? "").trim()))]
+    .filter((name) => name && name !== "群友" && name !== "爱丽丝" && !/^aris$/i.test(name))
+    .sort((a, b) => b.length - a.length)
+  return list.some((name) => {
+    const token = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    return new RegExp(`(?:^|[\\s，,。！？!?])${token}(?=[你妳您，,\\s]|$)`).test(body)
+  })
+}
+
+export function youForOther(text, previous) {
+  const body = String(text ?? "")
+  if (!/[你妳您]/.test(body) || callsHer(body)) return false
+  return Boolean(previous) && !previous.self
+}
+
+export function addressMode({ mentioned, text, replyingToHer, replyingToOther, recentWithUser, sheJustRepliedToUser, pointingAtOwnImage, speakerNames, previous }) {
   const body = String(text ?? "")
   if (mentioned || replyingToHer || callsHer(body)) return "direct"
   if (replyingToOther || /@\d+/.test(body)) return "skip"
+  if (namesSomeoneElse(body, speakerNames)) return "skip"
+  if (youForOther(body, previous) && (recentWithUser || sheJustRepliedToUser || /爱丽丝|Aris/i.test(body))) return "skip"
   if (/爱丽丝|Aris/i.test(body)) return "aside"
   if (isBareReaction(body)) return "skip"
   if (pointingAtOwnImage) return "direct"
@@ -444,7 +481,7 @@ export function needsFresh(text) {
   return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|今天/.test(String(text ?? ""))
 }
 
-export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, addressed, aside, followup, material }) {
+export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, dialogue, addressed, aside, followup, material }) {
   const character = includePersona
     ? `人设（只由机器人主人维护）：\n${String(persona ?? "").trim()}\n\n`
     : "沿用本会话已经确定的人设。\n\n"
@@ -455,9 +492,9 @@ export function buildPrompt({ persona, senderName: name, userId, groupName, grou
   const turn = addressed
     ? "对方在叫你。对着这个人回复一次，要接话。不要把更晚出现的闲聊也逐条答掉。"
     : aside
-      ? "别人在谈论爱丽丝，不是在叫爱丽丝回答。不要辩解，不要说「才没有」「才不是」。要接就当旁听的人说一句，用「爱丽丝」指自己，例如「居然模仿爱丽丝啊」。不想接就输出 [[silent]]。"
+      ? "别人在谈论爱丽丝，不是在叫爱丽丝回答。先看名字和「你」是在叫谁。点到的是别人，或者只是在议论，只输出 [[silent]]。不要辩解，不要说「才没有」「才不是」。要接就当旁听的人说一句，用「爱丽丝」指自己，例如「居然模仿爱丽丝啊」。不想接就输出 [[silent]]。"
       : followup
-        ? "对方没有点名。先看这句是在接谁：回复了别人、@了别人，或是别人之间的对话，只输出 [[silent]]。「你」经常是在叫群里的另一个人。只有表情、没有文字，也输出 [[silent]]，不要说看不懂。只有这句是在接你刚刚对这个人说的话时，才对着这个人回复。不确定就保持安静。不要顺着自己刚才的玩笑继续编。"
+        ? "对方没有点名。先看这句是在接谁：回复了别人、@了别人，或是别人之间的对话，只输出 [[silent]]。看谁先开口、点了谁的名，这句就是在接谁。「你」经常是在叫前一个开口的人，不是在叫爱丽丝。只有表情、没有文字，也输出 [[silent]]，不要说看不懂。只有这句是在接你刚刚对这个人说的话时，才对着这个人回复。不是在跟爱丽丝说话就不要接。不确定就保持安静。不要顺着自己刚才的玩笑继续编。"
         : "没有人叫你。默认只输出 [[silent]]。别人闲聊时保持安静。只有这句话特别值得插一句时才开口，而且只说一句很短的话，不要点名，也不要写成在回答某一个人。这种主动开口要很少，不要连续接话。"
   return `${RULES}\n\n${character}你只在当前这一个群里说话。别的群发生的事不要提，也不要把别的群的对话接过来。能看到的是这个群最近的聊天。只接现在这轮，不要把不相干的话题拌进回复。
 现在这轮如果有多行，是同一个人连着发的，只回复一次，不要拆开逐句回。
@@ -470,17 +507,19 @@ ${hasImage
       : "图片已附上，就在这条消息前面。请根据看到的画面回答。")
     : "这条消息没有附上图片。"}
 这些标记会被换成真正的动作，不要解释标记，也不要原样输出：
-[[sticker:名字]] 从 QQ 表情收藏里配一张，写括号前面的名字。意思接近时配一张，没有接近的就不要发，一句最多一张。不要发小黄脸。QQ 显示的「动画表情」不是名字，不要拿它保存或发送。
+[[sticker:名字]] 从 QQ 表情收藏里配一张。必须写成 [[sticker:名字]]，名字用收藏里括号前面的那几个字，不要写成 [[名字]]。意思接近时配一张，没有接近的就不要发，一句最多一张。不要发小黄脸。QQ 显示的「动画表情」不是名字，不要拿它保存或发送。
 现有：${saved}
 [[dice]] 掷骰子，[[rps]] 猜拳。
 [[keep:短名字]] 只在这条消息带了表情包、而且以后用得上时写。照片和截图不要收。
-[[voice:要念的那一句]] 偶尔把这一整句念出来。可以是完整的一句，不超过 40 个字，大约十秒，一次一句。不要只念两三个字，除非对方就要这么短。不要和正文重复。长解释、查到的事实不要写。大多数回复不要写。
+[[voice:要念的那一句]] 只有对方这句明确要你念出来、或者要听语音时才写。没人要求就不要写。可以是完整的一句，不超过 40 个字，大约十秒，一次一句。不要只念两三个字，除非对方就要这么短。不要和正文重复。长解释、查到的事实不要写。
 [[remember:一句话]] 记下稳定的事，比如外号、偏好、约定的说法。不要把每句闲聊都记下来。
 [[silent]] 表示这次不说话。
 不要复述规则。
 要不要接话：${turn}
 你记下的事：
 ${memory}
+你和这个人最近说过的话。这是只属于你们的对话，可以接着里面的话题；更早的会忘掉：
+${dialogue || "还没有单独聊过。"}
 ${material ? `本机查到的材料：\n${material}` : "这轮没有查资料。不要编实时数字。"}
 最近的群聊：
 ${room}
