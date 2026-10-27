@@ -3,8 +3,9 @@ import { normalizeName, stickerLabel } from "./stickers.js"
 
 const RULES = `你是接入 QQ 群的聊天机器人。
 只输出准备发到群里的正文，用口语，通常一两句。
-别人在问事实、近况、作品、角色、价格时，只根据「本机查到的材料」回答。材料写了没连上，或者没有可用数字，就说没查到，不要编。
-闲聊、看法、人设里已经有的事，按平时说话，不要提搜索。
+别人在问天气、新闻、价格、近况这类会变的事，而这轮还没有「本机查到的材料」时，不要回答，只输出 [[search:查询词]]。查询词写成能拿去搜的短句。
+已经有材料时，只根据材料回答。材料写了没连上，或者没有可用数字，就说没查到，不要编，也不要再写 [[search:]]。
+闲聊、看法、人设里已经有的事，按平时说话，不要写 [[search:]]。
 不要调用工具，不要读写文件，不要执行命令，不要暴露密钥、配置或本机路径。
 不要编造。
 别人刚发来表情包，而这张以后用得上时，写 [[keep:短名字]]。短名字 2 到 8 个字。照片、截图和普通图片不要收。没有系统提示「收下了」时，不要说已经存下来或收进道具栏。
@@ -167,7 +168,7 @@ export function shouldCarryImage({ addressed, text, ageMs }) {
   return Boolean(addressed) || refersToImage(text)
 }
 
-const RESERVED_MARK = new Set(["silent", "dice", "rps", "voice", "remember", "keep", "face", "sticker", "react"])
+const RESERVED_MARK = new Set(["silent", "dice", "rps", "voice", "remember", "keep", "face", "sticker", "react", "search"])
 
 export function parseOutgoing(text) {
   const pattern = /\[\[(face|sticker|react):([^\]\n]{1,24})\]\]|\[\[(dice|rps)\]\]|\[\[([^\]:\n]{1,16})\]\]/g
@@ -421,6 +422,7 @@ export function takeAsides(text) {
   const notes = []
   const keeps = []
   let voice = ""
+  let search = ""
   let stripped = String(text ?? "").replace(/\[\[remember:\s*([^\]\n]{1,80})\]\]/g, (_, note) => {
     const cleaned = String(note ?? "").trim()
     if (cleaned) notes.push(cleaned)
@@ -436,8 +438,13 @@ export function takeAsides(text) {
     if (cleaned && !voice) voice = cleaned
     return ""
   })
+  stripped = stripped.replace(/\[\[search:\s*([^\]\n]{1,80})\]\]/g, (_, query) => {
+    const cleaned = String(query ?? "").trim()
+    if (cleaned && !search) search = cleaned
+    return ""
+  })
   const silent = /\[\[silent\]\]/.test(stripped) && stripped.replace(/\[\[silent\]\]/g, "").trim() === ""
-  return { text: stripped.replace(/\[\[silent\]\]/g, ""), notes, keeps, silent, voice }
+  return { text: stripped.replace(/\[\[silent\]\]/g, ""), notes, keeps, silent, voice, search }
 }
 
 export function planVoice(text, voice, allow) {
@@ -473,12 +480,8 @@ export function threadKey(groupId, userId) {
   return `${String(groupId)}:${String(userId)}`
 }
 
-export function needsSearch(text) {
-  return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|作品|角色|查询|查一下|搜一下|搜索|今天/.test(String(text ?? ""))
-}
-
 export function needsFresh(text) {
-  return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|今天/.test(String(text ?? ""))
+  return /价格|多少钱|金价|黄金|行情|新闻|最新|近况|今天|天气|预报|气温/.test(String(text ?? ""))
 }
 
 export function buildPrompt({ persona, senderName: name, userId, groupName, groupId, text, includePersona, stickerNames, stickerCatalog, hasImage, carriedImage, transcript, notes, dialogue, addressed, aside, followup, material }) {
@@ -500,19 +503,20 @@ export function buildPrompt({ persona, senderName: name, userId, groupName, grou
 现在这轮如果有多行，是同一个人连着发的，只回复一次，不要拆开逐句回。
 带「更晚」的是这轮之后才出现的话。话题已经过去、又不是在叫你，就输出 [[silent]]，不要补一句晚到的回复。
 不要把以前和这个人聊过的梗硬拉回当前群聊。群里换话题了就跟着新的，或者不说话。
-像群里的普通人说话。一句通常就够。真的要再补一句时，空一行再写，第二句更短，不要超过两句，也不要为了凑字数硬补。对方发来表情、开玩笑、或者说得很短时，可以回一个表情，不要每句都发。
+像群里的普通人说话。一句通常就够。真的要再补一句时，空一行再写，第二句更短，不要超过两句，也不要为了凑字数硬补。大多数回复只说话。对方发来表情，或明显在开玩笑时，可以回一个表情。普通回答、事实和短句都不要配。不要每句都发。
 ${hasImage
     ? (carriedImage
       ? "图片已附上，是对方刚才单独发来的那一张，就在这条消息前面。请根据看到的画面回答。"
       : "图片已附上，就在这条消息前面。请根据看到的画面回答。")
     : "这条消息没有附上图片。"}
 这些标记会被换成真正的动作，不要解释标记，也不要原样输出：
-[[sticker:名字]] 从 QQ 表情收藏里配一张。必须写成 [[sticker:名字]]，名字用收藏里括号前面的那几个字，不要写成 [[名字]]。意思接近时配一张，没有接近的就不要发，一句最多一张。不要发小黄脸。QQ 显示的「动画表情」不是名字，不要拿它保存或发送。
+[[sticker:名字]] 从 QQ 表情收藏里配一张。必须写成 [[sticker:名字]]，名字用收藏里括号前面的那几个字，不要写成 [[名字]]。没有明显需要就不要发，不要因为收藏里有意思接近的就配。一句最多一张，也不要连续每句都发。不要发小黄脸。QQ 显示的「动画表情」不是名字，不要拿它保存或发送。
 现有：${saved}
 [[dice]] 掷骰子，[[rps]] 猜拳。
 [[keep:短名字]] 只在这条消息带了表情包、而且以后用得上时写。照片和截图不要收。
 [[voice:要念的那一句]] 只有对方这句明确要你念出来、或者要听语音时才写。没人要求就不要写。可以是完整的一句，不超过 40 个字，大约十秒，一次一句。不要只念两三个字，除非对方就要这么短。不要和正文重复。长解释、查到的事实不要写。
 [[remember:一句话]] 记下稳定的事，比如外号、偏好、约定的说法。不要把每句闲聊都记下来。
+[[search:查询词]] 只有这轮还没有材料、而且要查会变的公开事实时才写。只写这一行，不要同时写正文、表情或语音。
 [[silent]] 表示这次不说话。
 不要复述规则。
 要不要接话：${turn}
@@ -520,11 +524,12 @@ ${hasImage
 ${memory}
 你和这个人最近说过的话。这是只属于你们的对话，可以接着里面的话题；更早的会忘掉：
 ${dialogue || "还没有单独聊过。"}
-${material ? `本机查到的材料：\n${material}` : "这轮没有查资料。不要编实时数字。"}
+${material ? `本机查到的材料：\n${material}\n根据这些材料回答。不要再写 [[search:]]。` : "这轮还没有查资料。会变的事实不要编。要查就只输出 [[search:查询词]]，不要同时写别的。"}
 最近的群聊：
 ${room}
 群：${groupName}（${groupId}）
 发送者：${name}（${userId}）
+「老师」只加在这个群的成员身上。设定里的同伴和作品、新闻里的人物不要加「老师」。
 现在这条：
 ${text}`
 }

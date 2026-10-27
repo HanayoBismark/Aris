@@ -1,9 +1,13 @@
+import { readFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import path from "node:path"
 import { needsFresh } from "./chat.js"
+import { readCredential } from "./model.js"
 
+const TAVILY_URL = "https://api.tavily.com/search"
 const GOLD_HOSTS = ["sge.com.cn", "cngold.org", "cngold.com.cn", "kitco.com", "gold.org"]
 const PRICE = /(\d{2,6}(?:\.\d{1,2})?)\s*(?:元\s*\/\s*克|元每克)/g
-const PAGE_CAP = 120000
-const EXCERPT_CAP = 300
+const EXCERPT_CAP = 800
 
 export function isPublicHttpUrl(value) {
   let url
@@ -41,25 +45,11 @@ export function isGoldHost(value) {
   return GOLD_HOSTS.some((item) => host === item || host.endsWith(`.${item}`))
 }
 
-export function shanghaiDay(date) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date)
-}
-
-export function selectResults(results, { fresh, now, maxResults, gold }) {
+export function selectResults(results, { fresh, maxResults, gold }) {
   let items = (Array.isArray(results) ? results : [])
     .map(normalizeResult)
     .filter((item) => item.url && isPublicHttpUrl(item.url))
-  if (fresh) {
-    items = items.filter((item) => !/wikipedia/i.test(item.engine) && !/wikipedia\.org/i.test(item.url))
-    const today = shanghaiDay(now)
-    const datedToday = items.filter((item) => item.publishedDate && sameDay(item.publishedDate, today))
-    if (datedToday.length > 0) items = datedToday
-  }
+  if (fresh) items = items.filter((item) => !/wikipedia/i.test(item.engine) && !/wikipedia\.org/i.test(item.url))
   if (gold) items.sort((a, b) => Number(isGoldHost(b.url)) - Number(isGoldHost(a.url)))
   return items.slice(0, maxResults)
 }
@@ -75,10 +65,10 @@ export function formatMaterial(items, conflict) {
     const when = `时间：${item.publishedDate || "没有时间"}`
     const body = item.pageOk
       ? [
-        item.prices.length ? `页面正文里的数字：${item.prices.join("、")} 元/克` : "页面正文里没有找到价格数字",
-        item.excerpt ? `页面摘录：${item.excerpt}` : "",
-      ].filter(Boolean).join("\n")
-      : `摘要：${item.snippet || "没有"}（未核实，不能单独拿来报价格或实时数字）`
+        item.prices.length ? `正文里的数字：${item.prices.join("、")} 元/克` : "正文里没有找到价格数字",
+        `正文：${item.excerpt}`,
+      ].join("\n")
+      : "这条没有正文。不要拿网址编内容，也不能拿它报价格或实时数字。"
     return [head, `网址：${item.url}`, when, body].join("\n")
   })
   if (conflict) lines.push(`两家数字不一致：${conflict}。不要取平均，并列说出来。`)
@@ -88,45 +78,59 @@ export function formatMaterial(items, conflict) {
 
 export async function gatherSearch(text, options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch
-  const now = options.now instanceof Date ? options.now : new Date()
   const fresh = needsFresh(text)
   const gold = /金价|黄金|足金|金条/.test(String(text ?? ""))
-  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 12000
-  const maxResults = Number(options.maxResults) > 0 ? Number(options.maxResults) : 5
-  const fetchPages = Math.min(2, Number(options.fetchPages) > 0 ? Number(options.fetchPages) : 2)
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000
+  const maxResults = Math.min(5, Number(options.maxResults) > 0 ? Number(options.maxResults) : 5)
+  const apiKey = await tavilyKey(options)
+  if (!apiKey) return offline("没有 TAVILY_API_KEY")
+  const topic = gold ? "finance" : fresh ? "news" : "general"
+  const body = {
+    query: String(text ?? "").trim(),
+    search_depth: "basic",
+    chunks_per_source: 2,
+    max_results: maxResults,
+    topic,
+    language: "zh-cn",
+    include_answer: false,
+    include_raw_content: false,
+    include_published_date: true,
+  }
+  if (fresh) body.time_range = "day"
+  if (topic === "general") body.country = "china"
   let payload
   try {
-    const endpoint = new URL("/search", options.searxngUrl || "http://127.0.0.1:8088")
-    endpoint.searchParams.set("q", fresh ? `${String(text).trim()} ${shanghaiDay(now)}` : String(text).trim())
-    endpoint.searchParams.set("format", "json")
-    endpoint.searchParams.set("language", "zh-CN")
-    if (fresh) endpoint.searchParams.set("time_range", "day")
-    const response = await fetchImpl(endpoint, {
+    const response = await fetchImpl(TAVILY_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
-      headers: { "X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1" },
     })
-    if (!response.ok) return offline(`HTTP ${response.status}`)
+    if (!response.ok) return offline(response.status === 401 ? "密钥无效" : `HTTP ${response.status}`)
     payload = JSON.parse(await readBody(response))
   } catch (error) {
-    return offline(timedOut(error) ? "超时" : "本机搜索服务未连接")
+    return offline(timedOut(error) ? "超时" : "Tavily 未连接")
   }
-  const selected = selectResults(payload?.results, { fresh, now, maxResults, gold })
-  const items = []
-  for (const [index, item] of selected.entries()) {
-    if (index >= fetchPages) {
-      items.push({ ...item, pageOk: false, prices: [], excerpt: "" })
-      continue
-    }
-    const page = await readPage(item.url, fetchImpl, Math.min(8000, timeoutMs))
-    const prices = page.ok ? pricesIn(page.text) : []
-    items.push({
-      ...item,
-      pageOk: page.ok,
-      prices,
-      excerpt: page.ok ? page.text.slice(0, EXCERPT_CAP) : "",
-    })
-  }
+  const selected = selectResults(payload?.results, { fresh, maxResults, gold })
+  const items = selected.map((item) => {
+    const excerpt = item.snippet.slice(0, EXCERPT_CAP)
+    return { ...item, pageOk: Boolean(excerpt), prices: pricesIn(excerpt), excerpt }
+  })
   return formatMaterial(items, priceConflict(items))
+}
+
+async function tavilyKey(options) {
+  if (options.apiKey) return String(options.apiKey).trim()
+  const file = options.credentialsFile ?? path.join(homedir(), ".dsh", ".credentials.yaml")
+  try {
+    return readCredential(await readFile(file, "utf8"), "TAVILY_API_KEY")
+  } catch (error) {
+    if (error?.code === "ENOENT") return ""
+    throw error
+  }
 }
 
 function offline(reason) {
@@ -134,20 +138,24 @@ function offline(reason) {
 }
 
 function normalizeResult(item) {
+  const url = String(item?.url ?? "").trim()
   const engines = Array.isArray(item?.engines) ? item.engines : []
+  const published = item?.published_date ?? item?.publishedDate
   return {
     title: String(item?.title ?? "").trim(),
-    url: String(item?.url ?? "").trim(),
+    url,
     snippet: String(item?.content ?? item?.snippet ?? "").replace(/\s+/g, " ").trim(),
-    publishedDate: item?.publishedDate ? String(item.publishedDate) : "",
-    engine: String(item?.engine ?? engines[0] ?? "").trim(),
+    publishedDate: published ? String(published) : "",
+    engine: String(item?.engine ?? engines[0] ?? hostOf(url)).trim(),
   }
 }
 
-function sameDay(value, today) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return false
-  return shanghaiDay(date) === today
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "")
+  } catch {
+    return ""
+  }
 }
 
 function priceConflict(items) {
@@ -166,57 +174,10 @@ function priceConflict(items) {
   return groups.map(([name, prices]) => `${name} ${[...prices].join("、")}`).join("；")
 }
 
-async function readPage(url, fetchImpl, timeoutMs) {
-  let current = url
-  for (let hop = 0; hop < 2; hop += 1) {
-    if (!isPublicHttpUrl(current)) return { ok: false, text: "" }
-    let response
-    try {
-      response = await fetchImpl(current, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) })
-    } catch {
-      return { ok: false, text: "" }
-    }
-    const status = Number(response.status)
-    if (status >= 300 && status < 400) {
-      const location = header(response, "location")
-      if (!location) return { ok: false, text: "" }
-      current = new URL(location, current).toString()
-      continue
-    }
-    if (!response.ok) return { ok: false, text: "" }
-    const type = header(response, "content-type")
-    if (type && !/text|html|json|xml/i.test(type)) return { ok: false, text: "" }
-    const raw = await readBody(response)
-    return { ok: true, text: htmlToText(raw.slice(0, PAGE_CAP)) }
-  }
-  return { ok: false, text: "" }
-}
-
-function header(response, name) {
-  const headers = response?.headers
-  if (!headers) return ""
-  if (typeof headers.get === "function") return String(headers.get(name) ?? "")
-  return String(headers[name] ?? headers[name.toLowerCase()] ?? "")
-}
-
 async function readBody(response) {
   if (typeof response.text === "function") return String(await response.text())
   if (typeof response.arrayBuffer === "function") return Buffer.from(await response.arrayBuffer()).toString("utf8")
   return String(response.body ?? "")
-}
-
-function htmlToText(html) {
-  return String(html)
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
-    .replace(/\s+/g, " ")
-    .trim()
 }
 
 function timedOut(error) {

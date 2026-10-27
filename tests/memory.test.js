@@ -19,6 +19,7 @@ test("每个人只保留最近 16 句，更早的丢掉", async () => {
   assert.equal(turns.at(-1).text, "答19")
   assert.match(formatDialogue(turns, "小王"), /小王：问12/)
   assert.match(formatDialogue(turns, "小王"), /爱丽丝：答19/)
+  assert.equal(formatDialogue([{ role: "assistant", text: "老师在！[[探头]]" }], "小王"), "爱丽丝：老师在！")
   await memory.delete("8:7")
   assert.equal(memory.recall("8:7").length, 0)
 })

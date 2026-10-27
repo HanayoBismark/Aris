@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { ModelClient } from "./model.js"
-import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, callsHer, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, namesSomeoneElse, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, quietOrder, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, buildLingerPrompt, buildPrompt, callsHer, decide, isReusableSticker, listedBotTurn, mergeBurst, messageMedia, namesSomeoneElse, parseApiChoice, parseBotList, parseOutgoing, planVoice, quietOrder, shouldCarryImage, splitBubbles, stickerUrl, stopTargets, takeAsides, threadKey } from "./chat.js"
 import { gatherSearch } from "./search.js"
 import { loadConfig, root } from "./config.js"
 import { formatDialogue, Memory } from "./memory.js"
@@ -94,6 +94,7 @@ if (voices.enabled) {
   void voices.warm()
 }
 log(`接口：${providerLabel(config.dsh.provider)}，直接请求，不经过 dsh`)
+log(config.search.enabled ? "搜索：Tavily" : "搜索：关着")
 log(`管理员：${ADMIN_ID}`)
 await botIds()
 if (config.bot.groups.length === 0) log("群白名单为空，所有群的触发消息都会回复")
@@ -318,10 +319,6 @@ async function handle(action) {
   const catalog = await stickerCatalog()
   const transcript = formatTranscript(room.recent(action.groupId), action.messageIds ?? action.messageId)
   let material = ""
-  if (config.search.enabled && needsSearch(action.text)) {
-    material = await gatherSearch(action.text, config.search)
-    log(material.startsWith("搜索没连上") ? `搜索没连上：群 ${action.groupId}` : `查了资料：群 ${action.groupId}`)
-  }
   if (quieted(action)) return
   const promptFor = (hasImage) => buildPrompt({
     persona,
@@ -342,34 +339,51 @@ async function handle(action) {
     followup: action.followup,
     material,
   })
-  const prompt = promptFor(Boolean(image))
   if (quieted(action)) return
-  let result
-  try {
-    result = await model.complete(key, image ? [imageBlock(image), { type: "text", text: prompt }] : prompt)
-  } catch (error) {
-    if (quieted(action) || cancelled(error)) return
-    if (image && /image|vision|multimodal/i.test(String(error.message))) {
-      log(`看图失败，改为只看文字：${error.message}`)
-      try {
-        result = await model.complete(key, promptFor(false))
-      } catch (again) {
-        if (quieted(action) || cancelled(again)) return
-        if (String(again.message).includes("超时")) {
-          await reply(action, "想得有点久，这次先不回了。")
-          return
+  const askModel = async (withImage) => {
+    const prompt = promptFor(withImage)
+    try {
+      return await model.complete(key, withImage ? [imageBlock(image), { type: "text", text: prompt }] : prompt)
+    } catch (error) {
+      if (quieted(action) || cancelled(error)) return null
+      if (withImage && /image|vision|multimodal/i.test(String(error.message))) {
+        log(`看图失败，改为只看文字：${error.message}`)
+        sawImage = false
+        try {
+          return await model.complete(key, promptFor(false))
+        } catch (again) {
+          if (quieted(action) || cancelled(again)) return null
+          if (String(again.message).includes("超时")) {
+            await reply(action, "想得有点久，这次先不回了。")
+            return null
+          }
+          throw again
         }
-        throw again
       }
-    } else if (String(error.message).includes("超时")) {
-      await reply(action, "想得有点久，这次先不回了。")
-      return
-    } else {
+      if (String(error.message).includes("超时")) {
+        await reply(action, "想得有点久，这次先不回了。")
+        return null
+      }
       throw error
     }
   }
+  let sawImage = Boolean(image)
+  let result = await askModel(sawImage)
+  if (!result) return
   logModel(result)
-  const aside = takeAsides(result.text)
+  let aside = takeAsides(result.text)
+  if (aside.search && config.search.enabled) {
+    if (quieted(action)) return
+    const query = aside.search
+    material = await gatherSearch(query, config.search)
+    log(material.startsWith("搜索没连上") ? `搜索没连上：群 ${action.groupId}` : `查了资料：群 ${action.groupId}，${query.slice(0, 40)}`)
+    if (quieted(action)) return
+    result = await askModel(sawImage)
+    if (!result) return
+    logModel(result)
+    aside = takeAsides(result.text)
+    if (!aside.silent && !aside.text.trim() && !aside.voice) aside = { ...aside, text: "没查到。" }
+  }
   const added = await notebook.add(action.groupId, aside.notes)
   if (added.length > 0) log(`记下：${added.join("；")}`)
   if (aside.keeps[0]) {

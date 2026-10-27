@@ -15,7 +15,14 @@ export function formatDialogue(turns, name) {
   const list = Array.isArray(turns) ? turns : []
   if (list.length === 0) return "还没有单独聊过。"
   const who = String(name ?? "").trim() || "对方"
-  return list.map((turn) => `${turn.role === "assistant" ? "爱丽丝" : who}：${turn.text}`).join("\n")
+  return list.map((turn) => {
+    const text = turn.role === "assistant" ? withoutMarks(turn.text) : String(turn.text ?? "")
+    return text ? `${turn.role === "assistant" ? "爱丽丝" : who}：${text}` : ""
+  }).filter(Boolean).join("\n")
+}
+
+function withoutMarks(text) {
+  return String(text ?? "").replace(/\[\[[^\]]*\]\]/g, "").replace(/\s+/g, " ").trim()
 }
 
 export class Memory {

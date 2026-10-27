@@ -5,7 +5,7 @@ import path from "node:path"
 import test from "node:test"
 import { PassThrough } from "node:stream"
 import { AcpClient } from "../src/acp-client.js"
-import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, namesSomeoneElse, needsFresh, needsSearch, parseApiChoice, parseBotList, parseOutgoing, planVoice, quietOrder, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken, youForOther } from "../src/chat.js"
+import { addressMode, ADMIN_ID, BOT_CLOSING, BOT_COOLDOWN_MS, buildLingerPrompt, buildPrompt, choosePermission, cleanReply, decide, IMAGE_CARRY_MS, isAddressed, isMentioned, isReusableSticker, listedBotTurn, mergeBurst, messageText, namesSomeoneElse, needsFresh, parseApiChoice, parseBotList, parseOutgoing, planVoice, quietOrder, refersToImage, shouldCarryImage, splitBubbles, stickerSaveRequest, stopTargets, takeAsides, threadKey, withAccessToken, youForOther } from "../src/chat.js"
 import { faceTitle } from "../src/favfaces.js"
 import { formatTranscript } from "../src/room.js"
 import { SessionStore } from "../src/store.js"
@@ -108,7 +108,7 @@ test("人设只在需要时放进提示词", () => {
   assert.match(full, /人设标记-甲/)
   assert.match(full, /不要调用工具/)
   assert.match(full, /本机查到的材料/)
-  assert.match(full, /这轮没有查资料/)
+  assert.match(full, /这轮还没有查资料/)
   assert.doesNotMatch(full, /web_search/)
   assert.match(full, /不要超过两句/)
   assert.match(full, /最近的群聊/)
@@ -129,13 +129,19 @@ test("人设只在需要时放进提示词", () => {
   assert.match(buildPrompt({ text: "金价", material: "950.5 元/克" }), /950\.5 元\/克/)
 })
 
-test("只有事实和价格才查资料", () => {
-  assert.equal(needsSearch("查询一下当前黄金价格"), true)
-  assert.equal(needsSearch("今天有什么新闻"), true)
+test("搜索由模型写出标记，程序只抽出查询", () => {
+  assert.equal(needsFresh("明天上海天气"), true)
   assert.equal(needsFresh("今天有什么新闻"), true)
-  assert.equal(needsSearch("在吗"), false)
-  assert.equal(needsSearch("你觉得这个游戏怎么样"), false)
-  assert.equal(needsFresh("查询一下作品设定"), false)
+  assert.equal(needsFresh("在吗"), false)
+  const aside = takeAsides("[[search:明天上海天气]]")
+  assert.equal(aside.search, "明天上海天气")
+  assert.equal(aside.text, "")
+  const mixed = takeAsides("先记一下[[search:上海金价]][[voice:九百五]]")
+  assert.equal(mixed.search, "上海金价")
+  assert.equal(mixed.voice, "九百五")
+  assert.equal(mixed.text.includes("[["), false)
+  assert.match(buildPrompt({ text: "明天上海天气怎么样" }), /\[\[search:查询词\]\]/)
+  assert.match(buildPrompt({ text: "金价", material: "950.5 元/克" }), /不要再写 \[\[search:\]\]/)
 })
 
 test("工具权限默认拒绝，联网模式只放行搜索", () => {

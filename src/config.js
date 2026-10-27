@@ -73,13 +73,10 @@ function positive(value, fallback) {
 }
 
 function searchConfig(raw) {
-  const pages = positive(raw?.fetchPages, 2)
   return {
     enabled: raw?.enabled !== false,
-    searxngUrl: String(raw?.searxngUrl ?? "http://127.0.0.1:8088").replace(/\/$/, ""),
-    timeoutMs: positive(raw?.timeoutMs, 12000),
-    maxResults: positive(raw?.maxResults, 5),
-    fetchPages: Math.min(2, pages),
+    timeoutMs: positive(raw?.timeoutMs, 20000),
+    maxResults: Math.min(5, positive(raw?.maxResults, 5)),
   }
 }
 

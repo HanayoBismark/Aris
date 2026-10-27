@@ -32,9 +32,7 @@
   },
   "search": {
     "enabled": true,
-    "searxngUrl": "http://127.0.0.1:8088",
-    "timeoutMs": 12000,
-    "maxResults": 5,
-    "fetchPages": 2
+    "timeoutMs": 20000,
+    "maxResults": 5
   }
 }
